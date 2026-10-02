@@ -1,0 +1,38 @@
+logLevel: info
+logStructured: true
+
+authMethod: http
+authHTTPAddress: http://127.0.0.1:8201/internal/media/auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+api: true
+apiAddress: 127.0.0.1:9997
+metrics: true
+metricsAddress: 127.0.0.1:9998
+pprof: false
+
+# 사설망 주소(RTMP·ICE 바인딩, 허용 출처)는 .env의 MEDIA_HOST·PUBLIC_ORIGIN을 dev.py가 MTX_* 환경변수로 덮어쓴다.
+rtsp: false
+rtmp: true
+rtmpAddress: 127.0.0.1:1935
+hls: false
+srt: false
+moq: false
+
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcAllowOrigins:
+  - http://localhost:8200
+  - http://127.0.0.1:8200
+webrtcLocalUDPAddress: 127.0.0.1:8189
+webrtcLocalTCPAddress: 127.0.0.1:8189
+webrtcAdditionalHosts: []
+
+pathDefaults:
+  record: false
+
+paths:
+  all_others:

@@ -1,0 +1,45 @@
+{
+  "video": "../iot-server/assets/test-video.mp4",
+  "sha256": "7fdcd0c993120b47b3d578a518a21b4a04fc7cfa1b92666e368cddea7675bc88",
+  "status": "DRAFT",
+  "note": "초안(2026-09-30): 1초 간격 프레임(각 초의 .5초 지점)을 사람이 보고 작성했다. 사용자 확인 전이다. 구간은 [start,end) 초. 상태는 구간 안에서 보인 프레임 기준이며 도중에 바뀌면 changes에 시각을 적는다. 작업조끼(짙은 청색)도 조끼 착용(present)이다.",
+  "people": {
+    "P1": "베이지 바지, 공구상자를 든 사람. 짙은 청색 작업조끼. 안전모를 쓰지 않음. 40초 이후 보안경",
+    "P2": "청바지, 안전표지대와 안전모를 든 사람. 짙은 청색 작업조끼. 38초 무렵 안전모 착용",
+    "P3": "66–77초 모니터 앞 뒷모습. P2와 같은 사람인지 알 수 없어 별도로 둔다"
+  },
+  "segments": [
+    {"start": 0, "end": 10, "skip": false, "people": [],
+     "note": "0–2초 검은 화면, 전화기 근접, 4–7초 손·팔만 보임, 9초 이후 다리만 보임. 판정 대상 사람 없음"},
+    {"start": 10, "end": 20, "skip": false, "people": [
+      {"id": "P1", "hard_hat": "absent", "vest": "present"},
+      {"id": "P2", "hard_hat": "absent", "vest": "present",
+       "note": "안전모를 손에 들고 있음. 탐지된 hard_hat을 착용으로 연결하면 안 되는 사례"}],
+     "note": "10–12초 다리만, 12–18초 두 사람이 걸어옴, 18초 이후 빈 복도와 자막"},
+    {"start": 20, "end": 30, "skip": false, "people": [
+      {"id": "P1", "hard_hat": "unknown", "vest": "present", "note": "22–26초 발만, 29초 가림막 뒤 몸통만(머리 화면 밖)"},
+      {"id": "P2", "hard_hat": "unknown", "vest": "present", "note": "22–26초 발만, 29초 가림막 뒤 몸통만(머리 화면 밖)"}],
+     "note": "26–29초 장갑 끼는 근접 장면은 목·어깨만 보이고 누구인지 구분하기 어려워 따로 판정하지 않음"},
+    {"start": 30, "end": 40, "skip": false, "people": [
+      {"id": "P1", "hard_hat": "unknown", "vest": "present", "note": "30–32초 몸통만, 32–34초 다리만"},
+      {"id": "P2", "hard_hat": "absent", "vest": "present", "changes": [{"at": 38, "hard_hat": "present"}],
+       "note": "34–38초 보안경을 쓰는 근접 장면에서 머리가 보이고 안전모 없음, 38초부터 착용"}]},
+    {"start": 40, "end": 50, "skip": false, "people": [
+      {"id": "P1", "hard_hat": "absent", "vest": "present", "note": "46–50초 근접 장면은 보안경만 쓰고 안전모 없음"},
+      {"id": "P2", "hard_hat": "present", "vest": "present"}],
+     "note": "44–46·48초 손 근접"},
+    {"start": 50, "end": 60, "skip": false, "people": [
+      {"id": "P1", "hard_hat": "absent", "vest": "present", "note": "57–60초 뒷모습, 머리 위 보안경"},
+      {"id": "P2", "hard_hat": "present", "vest": "present"}],
+     "note": "큰 자막이 화면 일부를 가림"},
+    {"start": 60, "end": 70, "skip": false, "people": [
+      {"id": "P1", "hard_hat": "absent", "vest": "present"},
+      {"id": "P2", "hard_hat": "present", "vest": "present"},
+      {"id": "P3", "hard_hat": "absent", "vest": "unknown", "note": "뒷모습으로 어깨만 보이며 조끼 여부를 판단하기 어려움"}],
+     "note": "60–63초 두 사람 대화(법령 자막), 63–66초 검은 화면, 66초부터 모니터 앞 뒷모습"},
+    {"start": 70, "end": 80, "skip": false, "people": [
+      {"id": "P3", "hard_hat": "absent", "vest": "unknown"}],
+     "note": "제작진 이름 자막이 나옴. 요약에 이름을 적으면 안 되는 사례. 78초부터 로고"},
+    {"start": 80, "end": 84.45, "skip": true, "people": [], "note": "로고·검은 화면"}
+  ]
+}

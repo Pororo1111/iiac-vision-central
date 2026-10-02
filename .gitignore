@@ -1,0 +1,27 @@
+.env
+.env.*
+!.env.example
+.secrets/
+.artifacts/
+**/node_modules/
+**/.next/
+**/build/
+**/.gradle/
+**/out/
+**/__pycache__/
+*.pyc
+*.tsbuildinfo
+.idea/
+.DS_Store
+*.pem
+*.key
+output/
+.venv/
+
+# 에이전트 작업 지침·세션 인계 문서는 실제 사설망 주소를 담으므로 로컬에만 둔다.
+AGENTS.md
+CLAUDE.md
+docs/IOT_SESSION_HANDOFF.md
+
+# Next.js가 dev/build/typegen 때마다 다시 만드는 파일
+next-env.d.ts

@@ -1,0 +1,12 @@
+# 호스트 AI 워커·학습·영상 분석용 Python 3.12 패키지(.venv).
+# 설치: python3.12 -m venv .venv && .venv/bin/pip install -r ai-worker/requirements.txt
+ultralytics==8.4.139
+torch==2.12.0
+torchvision==0.27.0
+opencv-python==4.13.0.92
+numpy==2.3.5
+pillow==12.2.0
+PyYAML==6.0.3
+lap==0.5.13
+roboflow==1.4.0
+yt-dlp==2026.8.19

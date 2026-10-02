@@ -1,0 +1,89 @@
+name: central-server
+services:
+  db:
+    image: postgres:17.9-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-central}
+      POSTGRES_USER: ${POSTGRES_USER:-central}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-central}
+      POSTGRES_USER: ${POSTGRES_USER:-central}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?required}
+      IOT_DEVICE_ID: ${IOT_DEVICE_ID:-iot-001}
+      IOT_DEVICE_TOKEN: ${IOT_DEVICE_TOKEN:?required}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      AI_WORKER_TOKEN: ${AI_WORKER_TOKEN:-}
+      MEDIA_PUBLIC_URL: ${MEDIA_PUBLIC_URL:-http://127.0.0.1:8889}
+    ports:
+      - '127.0.0.1:8201:8080'
+    volumes:
+      - training-media:/app/data
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/api/health]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:3000/login]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  media:
+    image: bluenviron/mediamtx:1.21.1
+    restart: unless-stopped
+    environment:
+      MTX_AUTHHTTPADDRESS: http://backend:8080/internal/media/auth
+      MTX_RTMPADDRESS: :1935
+      MTX_WEBRTCADDRESS: :8889
+      MTX_WEBRTCLOCALUDPADDRESS: :8189
+      MTX_WEBRTCLOCALTCPADDRESS: :8189
+      MTX_APIADDRESS: :9997
+      MTX_METRICSADDRESS: :9998
+      MTX_WEBRTCADDITIONALHOSTS: ${MEDIA_HOST:-127.0.0.1}
+      MTX_WEBRTCALLOWORIGINS: http://localhost:8200,http://127.0.0.1:8200,${PUBLIC_ORIGIN:-http://localhost:8200}
+    ports:
+      - '${MEDIA_HOST:-127.0.0.1}:1935:1935'
+      - '127.0.0.1:8889:8889'
+      - '${MEDIA_HOST:-127.0.0.1}:8189:8189/tcp'
+      - '${MEDIA_HOST:-127.0.0.1}:8189:8189/udp'
+    volumes:
+      - ./media/mediamtx.yml:/mediamtx.yml:ro
+    depends_on:
+      backend: {condition: service_healthy}
+  nginx:
+    image: nginx:1.28.3-alpine
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:${CENTRAL_PORT:-8200}:80'
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/proxy_params:/etc/nginx/proxy_params_central:ro
+    depends_on:
+      backend: {condition: service_healthy}
+      frontend: {condition: service_healthy}
+volumes:
+  postgres-data:
+  training-media:
