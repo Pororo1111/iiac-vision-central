@@ -17,8 +17,8 @@ public class RecordingController {
   @PostMapping(value="/internal/ai/recordings",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
   public Recording register(@RequestParam MultipartFile file,@RequestParam String deviceId,@RequestParam String cameraId,
       @RequestParam @DateTimeFormat(iso=DateTimeFormat.ISO.DATE_TIME) OffsetDateTime startedAt,
-      @RequestParam double durationSeconds) throws Exception {
-    return service.register(file,deviceId,cameraId,startedAt,durationSeconds);
+      @RequestParam double durationSeconds,@RequestParam(defaultValue="FILE") String source) throws Exception {
+    return service.register(file,deviceId,cameraId,startedAt,durationSeconds,source);
   }
 
   @GetMapping("/api/recordings")

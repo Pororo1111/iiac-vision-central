@@ -399,6 +399,7 @@ def add_external(run: Path, add, counts: dict, baseline: dict, threshold: float,
 
     원본 train·val은 train·val로, 원본 test는 참고 평가용 ext_test로 둔다. 배포 판정 test는 기준 자료만 쓴다.
     후보는 (데이터셋 id, split, 파일명) 해시 순서로 보며 같은 입력은 항상 같은 이미지가 뽑힌다.
+    직접 검토한 local: 데이터셋(reviewed)은 소량 보강 자료라 상한에 넣지 않고 전부 먼저 넣는다.
     """
     source = json.loads((run / "run.json").read_text())
     counts["external"] = {}
@@ -406,7 +407,14 @@ def add_external(run: Path, add, counts: dict, baseline: dict, threshold: float,
     for item in source.get("external", []):
         data, _ = external_labels(item, device, threshold)
         counts["external"][item["name"]] = 0
-        candidates += [(item, entry, "ext_test" if entry["split"] == "test" else entry["split"]) for entry in data["items"]]
+        entries = [(item, entry, "ext_test" if entry["split"] == "test" else entry["split"]) for entry in data["items"]]
+        if item.get("reviewed"):
+            for _, entry, split in entries:
+                image = Path(entry["path"])
+                add(image, Path(), split, f"rf_{str(item['id'])[:8]}_{image.name}", "\n".join(entry["labels"]) + ("\n" if entry["labels"] else ""))
+                counts["external"][item["name"]] += 1
+            continue
+        candidates += entries
     limits = {"train": min(EXTERNAL_LIMIT, baseline["train"]), "val": baseline["val"], "ext_test": EXTERNAL_TEST_LIMIT}
     counts["externalAvailable"], counts["externalLimit"] = len(candidates), limits
     candidates.sort(key=lambda c: hashlib.sha256(f"{c[0]['id']}/{c[2]}/{Path(c[1]['path']).name}".encode()).digest())

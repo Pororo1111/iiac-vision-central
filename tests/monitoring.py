@@ -18,7 +18,7 @@ class Monitoring(unittest.TestCase):
         return Session().call('POST', '/iot/heartbeat', {'deviceId': self.fixture.id, 'modelName': 'best.pt', 'runtimeStatus': status}, self.iot)
 
     def test_command_flow(self):
-        self.assertEqual(self.beat(), (200, {'accepted': True, 'monitoring': None, 'deployment': None, 'restart': None, 'logRequest': None}))
+        self.assertEqual(self.beat(), (200, {'accepted': True, 'monitoring': None, 'deployment': None, 'restart': None, 'logRequest': None, 'streamRequest': None}))
         path = f'/devices/{self.fixture.id}/monitoring'
         self.assertEqual(self.admin.call('POST', path, {'action': 'PAUSE'})[0], 403)
         self.assertEqual(self.admin.call('POST', path, {'action': 'STOP'}, self.csrf)[0], 400)

@@ -9,7 +9,8 @@ import subprocess
 import sys
 import threading
 import uuid
-from urllib import request
+import time
+from urllib import error, request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -105,10 +106,20 @@ def process(task, api, token):
     child = None
 
     def heartbeat():
+        # 임대(120초)가 남아 있는 동안의 일시적인 연결 실패(백엔드 재시작 등)는 다시 시도한다.
+        # 중앙이 임대를 거절했거나(409, 관리자 중단 포함) 90초 넘게 갱신하지 못했을 때만 학습을 멈춘다.
+        failing_since = None
         while not stopped.wait(20):
             try:
                 api(path + '/heartbeat', lease)
+                failing_since = None
+                continue
+            except error.HTTPError as exc:
+                rejected = exc.code == 409 or exc.code == 404
             except Exception:
+                rejected = False
+            failing_since = failing_since or time.monotonic()
+            if rejected or time.monotonic() - failing_since > 90:
                 lost.set()
                 if child is not None and child.poll() is None:
                     child.terminate()

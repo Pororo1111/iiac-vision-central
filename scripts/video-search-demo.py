@@ -13,6 +13,7 @@ import importlib.util
 import json
 from pathlib import Path
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -51,6 +52,7 @@ def cleanup():
         (DATA / 'media/recordings' / (str(uuid.UUID(recording)) + '.mp4')).unlink(missing_ok=True)
     for batch in batches:
         (DATA / 'media/observations' / (str(uuid.UUID(batch)) + '.jpg')).unlink(missing_ok=True)
+        shutil.rmtree(DATA / 'media/detection-snapshots' / str(uuid.UUID(batch)), ignore_errors=True)
     print('데모 장치·녹화·분석 결과를 삭제했습니다.')
 
 
@@ -77,7 +79,10 @@ def setup(started):
         code, body = sim.send(batch, token)
         if code != 200:
             raise SystemExit(f'탐지 배치 전송 실패: {code} {body}')
-    print(f'탐지 배치 {len(batches)}개 전송, 구간 분석 대기(구간당 약 10초)…', flush=True)
+        codes = sim.send_snapshots(batch, token, started)
+        if any(c != 200 for c in codes):
+            raise SystemExit(f'원본 프레임 전송 실패: {codes}')
+    print(f'탐지 배치 {len(batches)}개·원본 프레임 전송, 구간 분석 대기(구간당 약 10초)…', flush=True)
     began = time.monotonic()
     while time.monotonic() - began < 900:
         counts = dict(line.split('|') for line in sql(

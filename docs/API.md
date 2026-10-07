@@ -30,7 +30,7 @@ Nginx 운영 구성에서 로그인 속도를 제한합니다. 현재 로컬 Nex
 {"deviceId":"iot-001","modelName":"best.pt","runtimeStatus":"RUNNING"}
 ```
 
-모델명은 최대 200자(정보가 없으면 빈 문자열). 상태는 `RUNNING`, `STOPPED`, `STALE`, `ERROR`, `UNKNOWN`. 요청에 선택 필드 `activeSha256`(현재 활성 모델 SHA-256, 소문자 64자리)을 보낼 수 있으며 생략하면 이전 값을 유지한다. 성공 200 `{"accepted":true,"monitoring":null,"deployment":null}`. 중앙 관리자가 감시 중지·재개를 요청했으면 `monitoring`은 `{"commandId":"UUID","action":"PAUSE|RESUME","requestedAt":"UTC"}`이며 같은 명령은 반영 뒤에도 같은 commandId로 계속 전달된다. IoT는 마지막으로 적용한 commandId를 저장하고 처음 보는 commandId만 적용한 뒤, 감시 상태를 `runtimeStatus`(감시 중 `RUNNING`, 중지 `STOPPED`)로 보고한다(V18). 먼저 등록해야 하며 5초마다 호출합니다(2026-09-28 10초에서 변경). 마지막 수신 시각은 중앙 서버 시각입니다.
+모델명은 최대 200자(정보가 없으면 빈 문자열). 상태는 `RUNNING`, `STOPPED`, `STALE`, `ERROR`, `UNKNOWN`. 요청에 선택 필드 `activeSha256`(현재 활성 모델 SHA-256, 소문자 64자리)을 보낼 수 있으며 생략하면 이전 값을 유지한다. 성공 200 `{"accepted":true,"monitoring":null,"deployment":null,"restart":null,"logRequest":null,"streamRequest":null}`(`streamRequest`는 아래 송출 임대 절). 중앙 관리자가 감시 중지·재개를 요청했으면 `monitoring`은 `{"commandId":"UUID","action":"PAUSE|RESUME","requestedAt":"UTC"}`이며 같은 명령은 반영 뒤에도 같은 commandId로 계속 전달된다. IoT는 마지막으로 적용한 commandId를 저장하고 처음 보는 commandId만 적용한 뒤, 감시 상태를 `runtimeStatus`(감시 중 `RUNNING`, 중지 `STOPPED`)로 보고한다(V18). 먼저 등록해야 하며 5초마다 호출합니다(2026-09-28 10초에서 변경). 마지막 수신 시각은 중앙 서버 시각입니다.
 
 ### 장치 진단: 명령 반영 확인·재시작·로그 (V22, 2026-09-28)
 
@@ -109,6 +109,68 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 ```
 
 `streamStatus`는 `STARTING`, `STREAMING`, `OFFLINE`, `ERROR` 중 하나입니다. 영상 publish는 `devices/{deviceId}/{cameraId}` 경로만 허용하며 중앙 장치 토큰을 MediaMTX 외부 인증에서 다시 검증합니다.
+
+## 시청 중에만 송출: 송출 임대 (2026-10-04, V27)
+
+유심 회선의 데이터 사용을 줄이기 위해 관리자가 `카메라 보기`를 열어 둔 동안에만 IoT가 송출한다. 중앙은 IoT에 접속하지 않고 heartbeat 응답 `streamRequest`로만 요청을 전달한다. 송출 경로·인증(RTMP publish, 장치 토큰)은 바뀌지 않는다.
+
+### 관리자 API (관리자 세션+CSRF)
+
+| API | 역할 |
+|---|---|
+| `POST /api/devices/{deviceId}/cameras/{cameraId}/stream-lease` | 본문 `{"viewerId":"UUID"}`. 임대 생성·연장. 응답 200 `{"cameraId","requestId","expiresAt"}` |
+| `DELETE /api/devices/{deviceId}/cameras/{cameraId}/stream-lease?viewerId=UUID` | 이 시청자만 해제. 204. 남은 시청자가 없으면 임대 삭제 |
+
+- 요청서의 `/api/admin/...` 대신 기존 관리 API 규칙(`/api/devices/...`, 관리자 세션 필수)을 따랐다.
+- `viewerId`는 화면이 창(대화상자)마다 만드는 UUID다. 시청자 키는 (관리자, viewerId)이므로 관리자 두 명 또는 같은 관리자의 두 창이 동시에 봐도 한쪽이 나가면 다른 쪽 시청은 유지된다.
+- 장치·카메라 임대는 하나로 합친다. 만료는 유효한 시청자 만료 중 가장 늦은 값이다. `requestId`는 임대를 새로 만들 때(처음 또는 만료·해제 뒤)만 바뀌고 연장 때는 유지된다.
+- 임대 길이 기본 60초(`STREAM_LEASE_TTL_SECONDS`). 같은 시청자가 10초(`STREAM_LEASE_MIN_EXTEND_SECONDS`) 안에 다시 요청하면 연장하지 않고 현재 임대를 그대로 돌려준다(오류 아님).
+- 등록되지 않은 장치·카메라는 404 `CAMERA_NOT_FOUND`, `viewerId` 형식 오류 400, 미인증 401, CSRF 누락 403. 장치 오프라인이어도 임대는 만들 수 있다(다음 heartbeat부터 전달).
+- 만료된 임대는 heartbeat 응답에서 즉시 빠지고, 60초마다 정리한다.
+
+### heartbeat 응답 `streamRequest`
+
+```json
+{"accepted":true,"monitoring":null,"deployment":null,"restart":null,"logRequest":null,
+ "streamRequest":{"cameraId":"test-video-0","requestId":"UUID","expiresAt":"2026-10-04T07:30:00Z"}}
+```
+
+- 유효한 임대가 없으면 `null`이다. 키는 항상 있다. 기존 필드는 바뀌지 않는다.
+- 한 장치에 임대가 여러 개면 가장 최근에 **새로 만든** 임대 하나만 보낸다(연장으로 대상이 바뀌지 않게 `createdAt` 기준).
+- `expiresAt`은 UTC ISO 8601이다. 화면이 30초마다 연장하므로 시청 중에는 heartbeat마다 늦춰진 값이 온다.
+
+### IoT 동작(IoT 구현, 중앙은 참고)
+
+- IoT 화면 수동 송출 또는 유효한 `streamRequest` 중 하나라도 있으면 송출하고, `expiresAt`이 지나면 다음 heartbeat 전이라도 끈다.
+- 감시 중지(PAUSE) 중, IoT 화면에서 송출을 끈 뒤 일정 시간, 하루 송출 상한 도달 시에는 임대가 있어도 송출하지 않는다. 상한 사유는 카메라 상태 `lastError`로 보고한다.
+- IoT에 없는 `cameraId`나 형식이 틀린 `streamRequest`는 무시한다.
+
+### 관리자 화면 동작
+
+- 창을 열면 임대를 만들고 30초마다 연장한다. 닫기·화면 이탈(`pagehide`)에서 `fetch keepalive` DELETE로 해제한다. 해제가 실패해도 60초 뒤 만료된다.
+- 탭이 1분 넘게 숨겨져 있으면 연장을 멈추고, 다시 보이면 임대를 새로 잡는다.
+- 1초마다 장치·카메라 상태를 확인하며 연결을 시도한다. `view-session`은 카메라 상태가 `STREAMING`이거나, IoT 보고 전이라도 MediaMTX 제어 API(`MEDIA_API_URL`, 기본 `http://127.0.0.1:9997`)에서 경로가 준비됐으면 발급한다.
+- 표시: 송출 중 / 연결 중(10초까지 "현장 장치 연결 중(최대 10초)", 30초 뒤 카메라 `lastError` 표시) / 송출 안 함(OFFLINE·장치 오프라인) / 오류(ERROR) / 감시 중지됨(마지막 감시 명령 PAUSE이고 `runtimeStatus`가 RUNNING이 아님). 테스트 영상 카메라(`test-video-*` 또는 표시명에 "시뮬레이션")는 시뮬레이션 배지를 붙인다.
+
+## 송출 영상 검색: 송출 녹화 색인 (2026-10-04, V28)
+
+장치 송출(`devices/{deviceId}/{cameraId}`)도 영상 검색 대상이다. 2026-10-04 V29부터 장치가 탐지 배치를 직접 보내는 카메라는 녹화만 등록하고(아래 `iot-active`), 그 밖의 카메라는 중앙이 송출 녹화에서 직접 탐지한다.
+
+| 단계 | 담당 | 내용 |
+|---|---|---|
+| 녹화 | MediaMTX | 장치 경로만 fMP4 1분 분할 녹화(`media/mediamtx.yml`, dev.py가 `MTX_PATHDEFAULTS_RECORDPATH=.artifacts/local-dev/stream-recordings/...`). 파일 이름이 분할 시작 시각(중앙 지역 시각). MediaMTX 사본은 24시간 뒤 삭제 |
+| 색인 | `ai-worker/stream_indexer.py`(dev.py `indexer`) | 10초마다 완료된 분할을 찾는다. 마지막 분할은 MediaMTX에서 경로가 준비 상태가 아니고 15초 동안 쓰이지 않았을 때 완료로 본다 |
+| 원본 녹화 | `POST /internal/ai/recordings` `source=STREAM` | 길이 = `min(디코딩 프레임 수/fps, 다음 분할 시작 − 이번 시작)`. 송출 시작 직후 프레임이 몰려 들어와 프레임 기준 길이가 실제보다 약 2초 길었던 것을 자른다 |
+| 재탐지 여부 | `GET /internal/ai/detections/iot-active` | 최근 24시간 안에 장치 배치(`IOT`)가 있는 카메라는 YOLO 없이 프레임 수만 세어 녹화만 등록한다. 같은 시간대에 탐지가 두 벌 생기지 않게 하기 위해서다 |
+| 탐지 배치 | `POST /internal/ai/detections`(워커 Bearer) | 기준 모델 YOLO+ByteTrack(`scripts/simulate-video-iot.py`의 `analyze`) 5fps, 분할 안의 10초 창. batchId = UUIDv5(분할 파일·창 번호). 본문·검증·중복 처리는 `POST /api/iot/detections`와 같고 `deviceId`는 본문 값(등록 장치여야 함) |
+| 구간 분석·검색 | 기존 | 탐지 배치 저장과 같은 트랜잭션에서 구간 분석 작업 등록 → `observer.py` → `/video-search` |
+
+- `POST /internal/ai/recordings`에 선택 필드 `source`(`FILE` 기본, `STREAM`)를 추가했다. 그 밖의 값은 400 `INVALID_SOURCE`.
+- 처리 기록은 `.artifacts/local-dev/stream-indexer.json`이다. 다시 처리해도 녹화(같은 시작·파일)와 batchId가 같아 늘지 않는다. 실패는 분할당 3회까지 재시도한다. 단, 탐지 규칙을 바꾼 뒤 다시 처리하면 같은 batchId에 다른 내용이라 409가 되므로 기존 배치를 지우고 처리한다.
+- 컷 판정(2026-10-04 보강): 히스토그램 거리 > 0.35 또는 (> 0.15 그리고 64×36 회색조 평균 절대차 > 40). 색 분포가 비슷한 공항 송출 영상의 즉시 전환(거리 0.16~0.21, 화소 차이 약 62)을 잡는다. 교차 전환(디졸브)은 잡지 못한다. 공사 현장 테스트 영상은 컷 26 → 28개(추가 2개는 사람이 실제 전환으로 확인).
+- 녹화 시작 시각은 분할 파일 이름 시각(중앙 수신 기준)에서 `STREAM_LATENCY_SECONDS`(색인 워커 환경변수, 기본 0)를 뺀 값이다. 장치 배치 시각(촬영 시각)과 재생 위치를 맞추는 보정이며 실제 송출 지연은 장치 배치가 들어온 뒤 측정해 정한다(미측정).
+- 장치 배치로 전환되는 순간 이미 중앙이 탐지한 시간대에 장치 배치가 늦게 도착하면 같은 시간대 구간이 두 벌 생길 수 있다(처리하지 않음).
+- 한계: 중앙이 직접 탐지하는 카메라는 IoT가 그린 탐지 박스·라벨·`TEST VIDEO (SIMULATION)` 배너 위에서 다시 탐지·Gemma 판정을 한다(Gemma가 화면의 라벨 글자를 근거로 삼을 수 있음, 프롬프트 `segment-v4-overlay`로 완화만 함). IoT 송출은 2026-10-04부터 중지 버튼을 누르기 전까지 계속된다(IoT 변경, 송출 임대와의 관계는 미확인). 중앙 녹화 사본(`MEDIA_ROOT/recordings`)의 보존 기한은 아직 없다. Docker 구성의 녹화 경로·색인 워커는 미검증이다.
 
 ## 오류
 
@@ -233,7 +295,7 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 
 - 파이프라인 단계: `COLLECTING` → `LABELING` → `DATASET` → `RUN`, 실패 `FAILED`, 취소 `CANCELLED`. EXISTING은 이전 실행에 쓰지 않은 태그 있는 LABELED 이미지(최대 200장)를 쓴다.
 - 학습 작업은 전역 1개만 실행하므로 다른 학습 중에는 데이터셋 단계에서 기다린다.
-- 외부 데이터셋은 워커(`ai-worker/external.py`)가 `scripts/yolo_datasets.py`로 `.artifacts/ai-assets/datasets/roboflow`에 받고 같은 버전은 재사용한다. 키는 중앙 `.env`의 `ROBOFLOW_API_KEY`다. 클래스는 이름으로 자동 매핑한다(부정 클래스 NO-* 제외, person·worker → person, vest → safety_vest, cone → traffic_cone, hat·hardhat·helmet → hard_hat). 선택한 데이터셋은 원본 train·val을 train·val에, 원본 test는 참고 평가용 `ext_test`에 넣는다. 배포 판정 test는 기준 자료만 쓴다.
+- 외부 데이터셋은 워커(`ai-worker/external.py`)가 `scripts/yolo_datasets.py`로 `.artifacts/ai-assets/datasets/roboflow`에 받고 같은 버전은 재사용한다. 키는 중앙 `.env`의 `ROBOFLOW_API_KEY`다. 클래스는 이름으로 자동 매핑한다(부정 클래스 NO-* 제외, person·worker → person, vest → safety_vest, cone → traffic_cone, hat·hardhat·helmet → hard_hat). 선택한 데이터셋은 원본 train·val을 train·val에, 원본 test는 참고 평가용 `ext_test`에 넣는다. 배포 판정 test는 기준 자료만 쓴다. 외부 데이터는 split별 상한(train 기준 train 수·최대 3,000, val 기준 val 수, ext_test 200)까지만 뽑지만, 직접 검토해 등록한 `local:` 데이터셋은 상한에 넣지 않고 전부 포함한다(2026-10-04).
 - 외부 데이터 상한: train은 기준 train 수와 3,000장 중 작은 값, val은 기준 val 수, ext_test는 200장. (데이터셋 id, split, 파일명) 해시 순서로 뽑는다.
 - 누적 이어학습(2026-09-28): 베이스가 `release:<id>`이고 그 실행의 학습 스냅샷이 남아 있으면, 기준 자료가 아닌 이미지(수집 선별·외부)를 train·val·site_test·ext_test 같은 split으로 이어받는다. 부모도 그 부모를 이어받았으므로 자료가 누적된다. 기준 test는 이어받지 않고 매번 기준 자료에서 넣는다. 이번 실행에 같은 파일명이 이미 있으면 건너뛰고, 이어받은 수는 외부 상한에 포함하지 않는다. 스냅샷이 없는 BASE 후보·`default`·사전학습 베이스는 이어받지 않는다. 준비 summary의 `inherited`(split별 수)·`inheritedFrom`(부모 실행 id)에 기록한다.
 - 부분 라벨 보정: 원본에 없는 클래스는 현장 기본 4클래스 모델 박스(신뢰도 0.6 이상)로 채우고, 원본이 라벨한 클래스의 예측은 버린다. 안전모는 원본이 얼굴까지 머리 전체를 감싸는 경우가 있어(hard-hat-workers 기준 박스 높이 약 1.8배), 원본 박스 안에 중심이 있는 기존 모델 안전모 박스로 좌표를 바꾸고 대응 박스가 없으면 이미지를 제외한다. 없는 클래스에 0.25~0.6 박스가 있으면 이미지 전체를 제외한다. 실행 summary의 `externalExcluded`가 제외 수다. 모델이 아예 놓친 객체는 배경으로 남으며 사람 검토는 없다.
@@ -242,7 +304,7 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 - 학습 기본값: 마법사 epoch 100, imgsz 640, batch 8(고정), AdamW lr0 0.0001.
 - 수집 이미지 자동 분할: 자동 선별을 통과한 수집 이미지를 묶음(같은 영상 가져오기, 같은 장치·카메라의 10분 구간, 직접 올린 이미지는 한 장씩) 단위로 train/val/test 70/15/15 나눈다. 묶음이 5개 미만이면 모두 train. 현장 test는 `images/site_test`에 따로 두며 배포 판정용 기준 test 82장과 섞지 않는다.
 - 현장 test가 10장 이상이면 평가 결과에 `evaluation.site`(기준·후보 mAP, `deltaMap50_95`)를 참고로 기록한다. 라벨이 현장 기본 모델의 박스 초안에서 오므로 기본 모델에 유리하게 나올 수 있고, 배포 판정에는 쓰지 않는다.
-- 이름: 파이프라인 이름은 입력받지 않는다(V15). 학습 실행이 평가 완료·실패했거나 학습 전에 실패·취소되면 워커가 Gemma(`gemma4:12b`)로 40자 이내 이름을 추천해 파이프라인과 학습 실행에 함께 적용한다. 실패하면 규칙 이름(예: `Roboflow-Y26n-3ep`), 중복이면 ` #2`를 붙인다. 내부 `/internal/ai/pipelines/naming/claim`, `/internal/ai/pipelines/{id}/name`.
+- 이름: 파이프라인 이름은 입력받지 않는다(V15). 파이프라인을 만들면(자동 파이프라인 포함) 워커가 다른 대기 작업보다 먼저 Gemma(`gemma4:12b`)로 40자 이내 이름을 추천한다(2026-10-04 변경, 이전에는 학습 종료 후). 입력은 수집 방식·대상 규모·로보플로우 데이터·학습 옵션이며 학습 결과는 없다. 파이프라인은 이름이 정해진 뒤에 그 이름으로 학습 실행을 만들고, 학습 직전 3분(워커 임대 중이면 임대 기한)까지 이름이 없으면 메시지 `Gemma가 모델 이름을 정하는 중`으로 기다린 뒤 서버 규칙 이름으로 진행한다. Gemma 호출이 실패해도 워커가 규칙 이름(예: `Roboflow-Y26n-3ep`, 자동은 `자동-…`)을 쓰며, 중복이면 ` #2`를 붙인다. 내부 `/internal/ai/pipelines/naming/claim`, `/internal/ai/pipelines/{id}/name`.
 
 ## 전역 자동 파이프라인·빈 이미지 삭제 (2026-09-27 밤, V17)
 
@@ -276,24 +338,24 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 
 ## 원본 녹화·구간 재생 (2026-09-30, V23)
 
-영상 분석·검색 P1-a. 녹화 1건 = 장치·카메라·촬영 시작/종료 시각이 있는 MP4 파일 하나다. 재생 위치는 `요청 시각 - startedAt`(초)이며 범위는 `[startedAt, endedAt)`이다. 현재 등록 경로는 테스트 영상용 워커 API뿐이고 MediaMTX 녹화 연결(P1-b)은 미구현이다.
+영상 분석·검색 P1-a. 녹화 1건 = 장치·카메라·촬영 시작/종료 시각이 있는 MP4 파일 하나다. 재생 위치는 `요청 시각 - startedAt`(초)이며 범위는 `[startedAt, endedAt)`이다. 등록 경로는 워커 API이며, 2026-10-04부터 장치 송출의 MediaMTX 분할 녹화도 `source=STREAM`으로 등록한다(아래 송출 영상 검색 절).
 
 | API | 인증 | 동작 |
 |---|---|---|
-| POST `/internal/ai/recordings` | 워커 Bearer(loopback 8201) | multipart `file`(MP4 `ftyp` 머리글, 최대 500 MiB), `deviceId`, `cameraId`, `startedAt`(ISO 8601), `durationSeconds`(0 초과 86400 이하). 녹화 반환. 같은 장치·카메라·시작 시각에 같은 파일·길이를 다시 올리면 기존 녹화, 다르면 409 `RECORDING_CONFLICT` |
+| POST `/internal/ai/recordings` | 워커 Bearer(loopback 8201) | multipart `file`(MP4 `ftyp` 머리글, 최대 500 MiB), `deviceId`, `cameraId`, `startedAt`(ISO 8601), `durationSeconds`(0 초과 86400 이하), 선택 `source`(`FILE`·`STREAM`). 녹화 반환. 같은 장치·카메라·시작 시각에 같은 파일·길이를 다시 올리면 기존 녹화, 다르면 409 `RECORDING_CONFLICT` |
 | GET `/api/recordings?deviceId=&cameraId=` | 관리자 세션 | 최근 시작 순 최대 100건 |
 | GET `/api/recordings/{id}` | 관리자 세션 | 녹화 한 건 |
 | GET `/api/recordings/locate?deviceId=&cameraId=&at=` | 관리자 세션 | `{recording, offsetSeconds, playbackPath}`. 해당 시각을 포함한 녹화가 없으면 404 `NO_RECORDING`. 겹치면 가장 늦게 시작한 녹화 |
 | GET `/api/recordings/{id}/video` | 관리자 세션 | `video/mp4`, Range 요청 시 206, `Cache-Control: no-store, private` |
 
-- 녹화 필드: `{id, deviceId, cameraId, startedAt, endedAt, durationSeconds, source:"FILE", sha256, sizeBytes, createdAt}`. 시각은 마이크로초 단위로 저장한다.
+- 녹화 필드: `{id, deviceId, cameraId, startedAt, endedAt, durationSeconds, source:"FILE"|"STREAM", sha256, sizeBytes, createdAt}`. 시각은 마이크로초 단위로 저장한다.
 - 오류 코드: `INVALID_CAMERA`, `INVALID_DURATION`, `INVALID_VIDEO_SIZE`, `UNSUPPORTED_VIDEO`(400), `DEVICE_NOT_FOUND`, `RECORDING_NOT_FOUND`, `RECORDING_FILE_MISSING`, `NO_RECORDING`(404).
 - 파일은 `MEDIA_ROOT/recordings/{id}.mp4`에 둔다. 장치를 삭제하면 녹화 행도 삭제되지만 파일은 남으므로 정리 스크립트가 함께 지운다.
 - 등록 CLI: `.venv/bin/python scripts/register-recording.py <mp4> --device <id> --camera <id> [--started-at <UTC ISO>]`. 길이는 OpenCV 프레임 수/fps로 계산한다.
 
 ## 탐지 배치·사람-보호구 연결 (2026-09-30, V24)
 
-영상 분석·검색 P2. IoT가 한 카메라의 최대 60초 구간 YOLO·추적 결과를 배치로 보낸다. 현재 송신자는 테스트 영상용 모의 IoT(`scripts/simulate-video-iot.py`)뿐이며 실제 IoT 구현은 없다(iot-server 인계 전).
+영상 분석·검색 P2. IoT가 한 카메라의 최대 60초 구간 YOLO·추적 결과를 배치로 보낸다. 송신자는 테스트 영상용 모의 IoT(`scripts/simulate-video-iot.py`)이며, 실제 IoT 송신은 2026-10-04 iot-server 세션에 계약을 인계해 구현 중이다(중앙 연동 미검증).
 
 | API | 인증 | 동작 |
 |---|---|---|
@@ -315,6 +377,10 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 - 인증 장치와 `deviceId`가 다르면 403 `DEVICE_MISMATCH`, 등록 전 장치는 409 `DEVICE_NOT_REGISTERED`. 오류 코드(400): `INVALID_WINDOW`, `FUTURE_BATCH`, `FRAME_OUTSIDE_WINDOW`, `FRAMES_NOT_SORTED`, `INVALID_BOX`, `INVALID_TRACK`, `CUT_OUTSIDE_WINDOW`, `TRACK_SPANS_CUT`, 형식 오류 `INVALID_REQUEST`.
 - 재전송: 같은 `batchId`·같은 내용은 추가 저장 없이 `duplicate:true`, 내용이 다르거나 다른 장치면 409 `BATCH_ID_CONFLICT`.
 - 원본 프레임·컷은 `detection_batches.payload`에 보존한다. 규칙을 바꾸면 다시 계산할 수 있다.
+- 시각은 오프셋이 있는 ISO 8601 문자열만 받는다(epoch 숫자 불가). 프레임 시각은 엄격히 증가해야 한다(같은 시각 두 개 불가). 0~1로 자른 뒤 폭·높이가 0인 박스는 보내지 않는다. `trackId`가 아직 없는 사람은 필드를 생략한다.
+- 중복 판정은 해석한 본문 전체의 SHA-256이다. 재전송은 처음 저장한 JSON을 그대로 보내야 한다(점수 반올림 등이 달라지면 409).
+- 배치 출처(V29 `detection_batches.source`): 이 API는 `IOT`, 중앙 색인 워커의 `/internal/ai/detections`는 `STREAM`.
+- 구간 분석 등록(V29): `person`이 한 번도 없는 배치는 분석하지 않고 바로 `SKIPPED`(`skip_reason=no_person`)다. 사람이 있는 `IOT` 배치는 사람 프레임 수(최대 4)만큼 원본 프레임을 기다린다(아래 절).
 
 연결 규칙 `ppe-assoc-v1`(중앙 `DetectionService`):
 
@@ -327,6 +393,46 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 | 미연결 | 머리 영역 밖 안전모(손에 든 경우 등)·몸통 밖 조끼는 배치의 `unassigned_hard_hats`·`unassigned_vests`로만 센다 |
 
 추적 요약 필드: `{batchId, sessionId, trackId, firstSeen, lastSeen, frames, maxScore, helmetFrames, vestFrames, helmet, vest, ruleVersion}`. `absent` 판정은 P3 Gemma 구간 분석이 시각 근거로만 만든다.
+
+## 탐지 원본 프레임 (2026-10-04, V29)
+
+장치 송출 영상에는 IoT가 그린 박스·클래스 라벨이 있어 Gemma가 그 글자를 판정 근거로 삼을 수 있다. 그래서 장치는 사람이 나온 배치마다 **오버레이를 그리기 전** 원본 프레임을 따로 보내고, 중앙은 이 이미지로 Gemma 구간 판정을 한다. 송출 녹화는 재생용으로 남는다.
+
+| API | 인증 | 동작 |
+|---|---|---|
+| POST `/api/iot/detection-snapshots` | 장치 Bearer, multipart | 필드 `batchId`(UUID), `deviceId`, `at`(ISO 8601, 오프셋 포함), `file`(JPEG). `{accepted:true, duplicate}` |
+| GET `/internal/ai/detections/iot-active?deviceId=&cameraId=` | 워커 Bearer | `{active}`: 최근 24시간 안에 이 카메라의 `IOT` 배치가 있으면 true. 색인 워커가 재탐지 여부를 정한다 |
+
+- 대상은 `person`이 있는 배치이며, 사람이 나온 프레임 중 시간상 고르게 최대 4장을 보낸다. 배치를 먼저 보내 성공한 뒤 보낸다.
+- 사람 감지 전송(2026-10-07 합의, IoT 미구현): 침입 순간 전송과 별도로, 침입 구역이 없는 카메라(웹캠 포함)도 `person`이 검출되면 프레임 1개 배치와 원본 1장을 보낸다. 사람이 처음 나타난 프레임, `hard_hat`·`safety_vest`가 새로 검출된 프레임(오탐 후보)은 바로, 사람이 계속 보이면 카메라별 최소 간격(기본 10초)마다 1장이다. 송출 영상은 오버레이 그대로 두고 클립 재생에 쓴다. 중앙 계약 변경은 없다.
+- `at`은 배치 `frames[].at` 중 하나와 같은 시각이어야 한다(표기 오프셋은 달라도 됨). 이미지는 긴 변 768px 이하·품질 80 정도의 JPEG, 1MiB 이하, 각 변 32px 이상을 권장·요구한다. 원본 바이트를 그대로 저장하고 SHA-256으로 재전송을 판정한다.
+- 저장 위치: `MEDIA_ROOT/detection-snapshots/{batchId}/{at 마이크로초}.jpg`. 배치가 지워지면(장치 삭제 등) 행은 함께 지워지고 파일은 1시간 주기 정리에서 지운다.
+
+| 상황 | 상태·본문 | 장치 처리 |
+|---|---|---|
+| 저장 / 같은 이미지 재전송 | 200 `{"accepted":true,"duplicate":false}` / `duplicate:true` | 완료 |
+| 배치가 아직 없음(또는 다른 장치의 배치) | 409 `BATCH_NOT_FOUND` | 백오프 후 재시도 |
+| 같은 배치·시각에 다른 이미지 | 409 `SNAPSHOT_CONFLICT` | 재시도하지 않음 |
+| `at`이 배치 프레임에 없음 | 400 `SNAPSHOT_NOT_IN_BATCH` | 재시도하지 않음 |
+| 배치당 4장 초과 | 400 `TOO_MANY_SNAPSHOTS` | 재시도하지 않음 |
+| JPEG 아님·깨짐·32px 미만 | 400 `INVALID_IMAGE` | 재시도하지 않음 |
+| 필드 누락·UUID/시각 형식 오류 | 400 `INVALID_REQUEST` | 재시도하지 않음 |
+| 1MiB 초과 | 413 `FILE_TOO_LARGE` | 재시도하지 않음 |
+| 토큰 없음·잘못됨 / `deviceId` 불일치 | 401 `UNAUTHORIZED` / 403 `DEVICE_MISMATCH` | 재시도하지 않음 |
+| 네트워크 오류·5xx·429 | – | 같은 내용으로 백오프 재시도 |
+
+구간 분석 대기 규칙(`observations.snapshot_expected`·`snapshot_due`·`frame_source`):
+
+| 조건 | 결과 |
+|---|---|
+| 기다리던 원본 프레임(사람 프레임 수, 최대 4)이 모두 옴 | 녹화가 없어도 바로 분석. `frame_source=SNAPSHOT` |
+| 기한(`max(구간 끝, 수신 시각) + 120초`)이 지났고 원본 프레임이 일부라도 있음 | 있는 원본 프레임으로 분석. `SNAPSHOT` |
+| 기한이 지났고 원본 프레임이 없음 | 구간 시작을 포함한 녹화가 있으면 녹화(송출이면 오버레이 포함)에서 4장을 뽑아 분석. `RECORDING`, 프롬프트 `segment-v4-overlay`(장치가 그린 박스·글자를 근거로 쓰지 말라는 안내 추가). 녹화도 없으면 계속 기다림 |
+| `STREAM`(중앙 색인) 배치·파일 등록 데모 | 원본 프레임을 기다리지 않고 녹화로 분석. `RECORDING` |
+
+- 검색 결과(`GET /api/observations/search`, 질문 결과)에 `frameSource`(`SNAPSHOT`·`RECORDING`·V29 이전 null)를 추가했다. `/video-search` 결과 카드는 `RECORDING`이면 "녹화 화면 판정"을 표시한다.
+- 녹화가 없는 구간(원본 프레임만으로 분석)은 `recordingId`·`playbackPath`가 null이며 재생할 수 없다.
+- 원본 프레임이 분석 뒤에 도착해도 다시 분석하지 않는다.
 
 ## 구간 분석·조건 검색·질문 대화 (2026-09-30, V25)
 
@@ -350,6 +456,61 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 - 검색 조건 `filter`: `{deviceId, cameraId, from, to, helmet, vest, text}`. null은 조건 없음. from·to가 없으면 그쪽 제한이 없고 둘 다 없으면 전체 기간이다. 둘 다 있으면 to가 from보다 뒤여야 한다(400 `INVALID_RANGE`). helmet·vest는 같은 사람이 두 조건을 모두 만족해야 한다. `text`는 요약·근거의 부분 일치(LIKE 특수문자는 글자 그대로).
 - 결과 구간: `{batchId, deviceId, cameraId, startedAt, endedAt, summary, persons, matched, recordingId, offsetSeconds, playbackPath}`. `matched`는 보호구 조건에 맞은 추적 ID, `offsetSeconds`는 녹화 안 재생 위치.
 - 질문 해석: Gemma는 날짜(YYYY-MM-DD)·24시간 시각·"쯤" 여부·보호구·문구만 고르고, 한국 시간 기간 계산은 워커 코드가 한다("쯤"은 ±30분, 시각 하나는 1시간, 날짜만이면 하루). 사람·작업자·장면 같은 일반 단어는 문구 조건에서 뺀다. 질문과 앞 대화에 날짜·시간 표현이 없으면 기간 조건을 만들지 않는다(전체 기간). 이어지는 질문은 같은 대화의 최근 5개 조건을 함께 준다. 질문 임대가 만료되면 다시 시도하지 않고 FAILED로 알린다.
+
+### 장면 집계 판정 (2026-10-05, V30, `segment-v4`)
+
+사람이 많은 구간(20~35명)에서 사람마다 판정·근거를 쓰면 응답이 길어져 구간당 21~42초가 걸리고 길이 초과가 났다. 그래서 Gemma는 구간 전체를 보고 인원만 집계한다. 호출은 이전처럼 구간당 1번(이미지 4장)이다.
+
+| 집계(`observations` 열, 결과 `counts`) | 의미 |
+|---|---|
+| `people` | 구간에 보이는 사람 수 |
+| `vestPresent` | 작업자 수. 작업자 = 조끼(형광·짙은 색 작업조끼 포함)를 입은 사람 |
+| `vestAbsent`·`vestUnknown` | 상체가 보이는데 조끼가 없는 사람(행인·승객 포함)·조끼 여부 불명 |
+| `helmetPresent`·`helmetAbsent`·`helmetUnknown` | **작업자만** 센 안전모 착용·미착용·판단 불가. 작업자가 아닌 사람의 안전모는 세지 않는다 |
+| `workersNoHelmet` | 작업자 중 안전모 미착용(= `helmetAbsent`). V30 열 주석의 "사람 전체 기준"은 `segment-v3` 기준이며 v4부터 안전모 집계는 작업자 기준이다 |
+
+- 완료 본문에 `counts`(위 8개 정수, 0~500)를 더했다. 완료(`COMPLETED`)에서만 허용하고, 안전모 합·조끼 합이 `people`보다 크거나 `workersNoHelmet`이 `min(vestPresent, helmetAbsent)`보다 크면 400 `INVALID_COUNTS`다. 워커는 저장 전에 작업자 수 ≥ 안전모 합, 사람 수 ≥ 조끼 합이 되게 고친다.
+- `persons`(사람별 판정)는 이제 **안전모 미착용 작업자 의심자**만 최대 3명이며, 집계의 `helmetAbsent`를 넘지 않는다. 근거 문장과 YOLO 연결 결과가 함께 저장된다.
+- 검색: 집계가 있는 구간은 `helmet=present|absent|unknown` → 해당 안전모 집계 > 0, `vest=…` → 해당 조끼 집계 > 0, `helmet=absent`와 `vest=present`를 함께 주면 `workersNoHelmet` > 0. 집계가 없는 V30 이전 구간은 기존처럼 같은 사람이 두 조건을 모두 만족하는지로 찾는다.
+- 결과 구간에 `counts`(이전 구간은 null)를 더했다. `/video-search` 카드에 "사람 N · 조끼 착용 N · 안전모 미착용 N" 한 줄을 표시한다. 집계로 찾은 구간은 `matched`(강조할 사람)가 비어 있을 수 있다.
+
+### 자세(쓰러짐) 판정과 침입 순간 전송 (2026-10-05, V31, `segment-v5`·`question-v4`)
+
+- Gemma는 보호구보다 먼저 사람의 자세를 본다. 집계에 `fallen`(쓰러져 있거나 누워 있거나 넘어지는 사람 수, 작업자 여부 무관)을 더했다(`observations.fallen`, 결과 `counts.fallen`, 완료 본문 `counts.fallen` 선택·`people` 이하). 앉거나 허리를 굽힌 작업 자세는 쓰러짐이 아니다.
+- 의심자(`persons`)는 쓰러진 사람(근거 앞에 `[쓰러짐]`)을 먼저, 안전모 미착용 작업자와 합쳐 최대 3명이며 각각 집계 수를 넘지 않는다.
+- 검색 조건 `fallen=true`(`GET /api/observations/search?fallen=true`, 질문 조건 `filter.fallen`)는 `fallen > 0` 구간을 찾는다. 질문 해석은 "쓰러진/넘어진/누워 있는/사고 난 사람"을 `fallen=true`로 바꾸고, 그 표현은 문구 조건으로 쓰지 않는다.
+- `/video-search` 카드는 쓰러진 사람이 있으면 집계 줄을 빨간색으로 "⚠ 쓰러짐 N"을 표시한다.
+
+침입 순간 전송(IoT 2026-10-05 합의, 중앙 API 변경 없음):
+
+| 순서 | IoT | 중앙 |
+|---|---|---|
+| 1 | 침입을 감지한 순간의 프레임 하나로 배치 전송: `startedAt=at`, `endedAt=at+1ms`, `frames=[{at, objects}]`, `batchId=UUIDv5(침입 이벤트 UUID)` | 사람이 있으면 원본 1장을 기다리는 구간 작업 등록 |
+| 2 | 같은 `batchId`·`at`으로 오버레이 없는 원본 1장 전송 | 도착 즉시 원본으로 Gemma 장면 집계(쓰러짐·작업자·안전모) |
+| 3 | 송출은 계속(재생용). 상시 탐지 배치 전송은 끈다 | 최근 24시간 IoT 배치가 있는 카메라는 송출 재탐지를 하지 않으므로, 침입 순간 밖의 시간대는 분석하지 않는다 |
+
+- 침입 이벤트(`/api/iot/events`)와 구간 판정은 장치·카메라·시각으로 맞춰 본다(연결 필드 없음).
+
+### 원본 이미지 판정·검색용 발견 사항 (2026-10-05, V32, `segment-v6`)
+
+- Gemma에는 박스·라벨을 그리지 않은 원본 프레임만 준다. 그린 라벨이 작은 이미지에서 머리를 가려 안전모 미착용 오판이 났기 때문이다. 박스를 그린 이미지는 결과 화면 대표 이미지에만 쓴다.
+- 응답: 장면 집계(위와 같음)·요약(2~3문장)·`findings`(눈에 띄는 사실 최대 6개, 자세·위치·옷차림·보호구·작업·장비·위험 상황). 발견 사항은 줄바꿈으로 이어 `observations.details`(완료 본문 `details`, 2000자 이하)에 저장한다.
+- 사람별 판정(`persons`·`observation_persons`)은 v6부터 만들지 않는다(사람 참조 라벨이 없다). 결과의 `persons`·`matched`는 빈 배열이다.
+- 검색 문구 조건(`text`, 질문의 사물·행동 명사)은 요약과 발견 사항을 부분 일치로 찾는다. 결과에 `details`를 더했고 `/video-search` 카드에 목록으로 보인다.
+
+### 녹화 클립 재생 (2026-10-05)
+
+| API | 인증 | 동작 |
+|---|---|---|
+| GET `/api/clips?deviceId=&cameraId=&at=&before=10&after=20` | 관리자 세션 | 장치 송출 녹화의 `[at−before, at+after]` 클립(fMP4, `video/mp4`, Range 지원). 합 120초 이하. 잘못된 값 400 `INVALID_CLIP`, 녹화 없음 404 `CLIP_NOT_FOUND`, 재생 서버 연결 실패 503 |
+
+- MediaMTX 내장 재생 서버(`playback`, 127.0.0.1:9996, 인증은 중앙이 하므로 MediaMTX 인증에서 제외)가 1분 분할 파일을 이어 붙인다. 쓰는 중인 분할도 읽으므로 침입 약 20~25초 뒤부터 재생된다(뒤 20초가 아직 없으면 그만큼 짧은 클립).
+- 송출 지연 보정: 녹화 시각은 중앙 수신 기준이라 장치 시각보다 늦다. `STREAM_LATENCY_MS`(기본 1600)만큼 클립 시작을 늦춘다. 색인 워커의 녹화 등록도 `STREAM_LATENCY_SECONDS`(기본 1.6)를 뺀다. 2026-10-05 침입 3건에서 원본 이미지와 클립 프레임을 대조해 1.2~2.0초(중앙값 1.6초)로 측정했다.
+- MediaMTX 녹화 보존은 7일(`recordDeleteAfter: 168h`)이다. 색인 워커가 만드는 중앙 녹화 사본(`MEDIA_ROOT/recordings`)은 여전히 보존 기한이 없다.
+- 요청 시작이 녹화 범위 앞이면(송출 시작 직후 장면) MediaMTX가 404를 주므로, 장면이 든 녹화 범위의 시작으로 당겨 그만큼 짧은 클립을 준다. 장면 시각 자체가 녹화 범위 밖이면 404.
+- 검색 결과의 `clipPath`는 MediaMTX 녹화 목록(`/list`)에 그 시각이 있을 때만 준다(검색 한 번에 장치·카메라당 한 번 조회). 없으면 null이고 화면 카드에 "녹화 없음"을 표시한다. 재생 실패 시 플레이어 아래에 이유를 표시한다(2026-10-05 사용자 "클립 재생 안 됨" 신고: 송출이 꺼져 있던 시각과 녹화 시작 직후 구간에도 재생 버튼이 나와 실패했다).
+- 검색 결과에 `clipPath`를 더했다. 파일로 등록한 데모 녹화(`FILE`)가 아닌 구간은 `clipPath`(구간 시작 10초 전부터 30초)로 재생하고, 데모는 기존 `playbackPath`+`offsetSeconds`를 쓴다.
+- 2026-10-05 수정(사용자 신고 "영상이 딱 1초", "구간이 아니라 전체를 보여줌"): MediaMTX `format=fmp4`는 전체 길이가 0으로 기록되어(`mvhd` duration 0, `mehd` 없음) 브라우저가 첫 조각(약 1초)만 길이로 봤다. `format=mp4`(일반 MP4, 길이 기록)로 바꿨다. `clipPath`는 `before=3&after=(구간 길이+5)`를 붙여 해당 구간만 자른다(침입 순간 배치는 약 8초). 데모 `playbackPath` 재생은 화면이 구간 위치 2초 전부터 구간 끝 3초 뒤에서 한 번 멈춘다. 한 열 배치(폭 1280px 이하)에서 결과를 누르면 맨 위 재생 화면으로 스크롤한다.
 
 ### 에이전트형 화면 보강 (2026-09-30, V26)
 
@@ -376,3 +537,30 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 - 워커(`observer.py`): Ollama `/api/version`이 응답하지 않으면 작업을 가져가지 않는다. 분석 도중 연결 거부·끊김은 `release`, HTTP 오류·응답 시간 초과는 일반 실패(시도 횟수 사용)로 둔다. 고장 난 모델이 시도 횟수 소모 없이 같은 작업을 끝없이 되돌리지 않게 하기 위해서다. 질문 도중 연결 실패는 "분석 모델이 응답하지 않습니다"로 FAILED.
 - 구간 분석 `segment-v2`: 응답을 저장 전에 검사해 길이 초과(`done_reason=length`)·JSON 아님·필수 필드 누락·모르는 사람 참조·허용되지 않은 판정값이면 `모델 응답 형식 오류: …`로 실패시킨다. 재시도(`attempt`>1)는 온도 0.4·seed=attempt로 바꿔 같은 오답 반복을 피한다.
 - 이름 가림: Gemma가 프레임의 글자를 `screenText`로 따로 옮기게 하고(저장·로그 안 함), 성씨로 시작하는 세 글자 낱말을 이름 후보로 삼아 요약·근거에서 `○○○`로 바꾼다. 화면 글자와 무관하게 직함 앞 이름(`김철수 씨`), `/` 나열(`권도현/이영섭`), 괄호 안 나열(`(이영섭, 박민수)`)도 가린다. 규칙 기반이라 성씨로 시작하지 않는 이름·외국 이름·두 글자 이름은 놓칠 수 있다.
+
+## 오탐 확인·관리자 검토 (2026-10-07, V33·V34)
+
+장치가 보낸 원본 프레임(탐지 원본 프레임 절)에 YOLO `hard_hat`·`safety_vest`가 있으면 오탐 확인 대상(`fp_checks`)이 된다. observer 워커가 박스마다 Gemma로 판정(real·false·unsure)하고, 오탐·애매가 있으면 관리자 확인 대기(`PENDING`), 모두 정탐이면 `NOT_NEEDED`다. **Gemma 판정만으로는 데이터셋에 넣지 않는다**(2026-10-07 검증에서 공항 남색 조끼·실제 안전모를 오탐으로 판정). 관리자가 박스별로 정탐·오탐을 정해 승인하면 중앙이 원본과 오탐 박스만 뺀 YOLO 라벨을 누적 데이터셋에 쓴다.
+
+| API | 인증 | 동작 |
+|---|---|---|
+| POST `/internal/ai/fp-checks/claim?deviceId=` | 워커 Bearer | 작업 임대(120초). `{id, leaseToken, attempt, batchId, at, deviceId, cameraId, path, width, height, objects:[{index, cls, score, box}]}`. `deviceId`는 검증용 범위 제한 |
+| POST `/internal/ai/fp-checks/{id}/complete` | 워커 Bearer | `{leaseToken, verdicts:[{index, verdict, seen, reason}], model, promptVersion, elapsedMs}`. 보호구 박스마다 정확히 하나(아니면 400 `INVALID_VERDICTS`), 임대 상실 409 `LEASE_LOST` |
+| POST `/internal/ai/fp-checks/{id}/fail`·`/release` | 워커 Bearer | 실패(3회까지 재시도)·모델 연결 장애 되돌림(시도 횟수 미소모) |
+| GET `/api/training/fp-checks?review=&limit=` | 관리자 | `{summary, dataset:{url, train, val, boxes}, items:[{item, imagePath}]}`. `review`는 `PENDING`·`APPROVED`·`REJECTED`·`NOT_NEEDED` |
+| GET `/api/training/fp-checks/{id}` | 관리자 | `{item, imagePath, width, height, objects}` (프레임의 YOLO 객체 전체) |
+| GET `/api/training/fp-checks/{id}/image` | 관리자 | 원본 JPEG |
+| POST `/api/training/fp-checks/{id}/review` | 관리자+CSRF | `{action: APPROVE\|REJECT, removed:[오탐 보호구 박스 index]}` → `{item, dataset}`. `PENDING`이 아니면 409 `REVIEW_NOT_PENDING`, 사람·없는 박스 지정은 400 `INVALID_REMOVED` |
+
+- 승인 데이터셋: `REVIEW_DATASET_ROOT`(dev.py는 `.artifacts/ai-assets/datasets/admin-fp`, 기본 `MEDIA_ROOT/admin-fp`)에 `admin_fp_{batchId}_{at 마이크로초}.jpg`와 라벨을 쓴다. 첫 승인은 val, 이후 이름 해시로 약 10%가 val이다. train·val이 모두 생기면 외부 데이터셋 `local:admin-fp`(화면 이름 "관리자 승인 오탐 보강")로 등록되고 이후 승인마다 수가 갱신된다. 승인 기록이 사라진 파일은 1시간마다 지운다.
+- 제외 카메라: `REVIEW_EXCLUDE_CAMERAS`(기본 `test-video*`). 테스트 영상은 기준·외부 데이터셋 이미지로 만들어 학습에 넣으면 평가가 오염되므로 확인 대상에 넣지 않는다.
+- Gemma 판정(`fp-v4`): 장면(빨간 박스)·확대 이미지와 사람이 확인한 현장 예시(`scripts/build-fp-references.py` → `.artifacts/ai-assets/fp-references/`)를 함께 본다. 오탐 판정은 YOLO 판단을 알려 주지 않은 두 번째 질문(조끼는 반사띠·형광색·덧입은 조끼 여부)이 모두 '아니오'일 때만 확정하고, 엇갈리면 애매다.
+
+### 영상 검색 대화 연결
+
+질문 조건(`filter`)에 `review: "pending"`이 있으면(Gemma `question-v5`가 "관리자 확인이 필요한 사진", "오탐 의심" 같은 질문으로 판단) 질문 결과는 구간 대신 `reviews`(위 `items`와 같은 형식, 장치·카메라·기간 조건 적용, 최대 100장)다. 데이터셋 만들기·학습·배포처럼 검색이 아닌 작업 요청에는 "대화에서 직접 할 수 없다"는 안내를 답한다. `/video-search`의 첫 예시 질문 "관리자 확인이 필요한 사진 있어?"를 누르면 바로 전송된다.
+
+### 파이프라인 외부 데이터셋 선택
+
+- `local:` 데이터셋(직접 확인·관리자 승인 보강)은 개수 제한이 없고, 로보플로우 데이터셋은 5개까지다(초과 400 `TOO_MANY_EXTERNAL`). 요청 목록 최대 30개.
+- GET `/api/training/external-datasets/lineage?baseModel=release:{id}` → `{inBase:[외부 데이터셋 id]}`: 베이스 모델 학습 계보에서 이미 쓴 데이터셋(이어받기로 포함됨). 화면은 "베이스 모델에 포함"으로 표시하고 선택 해제를 안내한다.

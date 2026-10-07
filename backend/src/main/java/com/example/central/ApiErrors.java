@@ -26,7 +26,9 @@ public class ApiErrors {
     MethodArgumentNotValidException.class,
     HandlerMethodValidationException.class,
     MethodArgumentTypeMismatchException.class,
-    HttpMessageNotReadableException.class
+    HttpMessageNotReadableException.class,
+    org.springframework.web.bind.MissingServletRequestParameterException.class,
+    org.springframework.web.multipart.support.MissingServletRequestPartException.class
   })
   ResponseEntity<?> invalid(Exception e) {
     return ResponseEntity.badRequest().body(Map.of("error", "INVALID_REQUEST"));

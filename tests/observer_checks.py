@@ -35,32 +35,48 @@ class Names(unittest.TestCase):
             self.assertEqual(mask_names(text, set()), (text, 0))
 
 
+# 모델 출력: 안전모 집계는 작업자(조끼 착용자)만. 저장 값에는 workersNoHelmet(= helmetAbsent)이 더해진다.
+COUNTS = {'people': 5, 'fallen': 0, 'vestPresent': 3, 'vestAbsent': 1, 'vestUnknown': 1, 'helmetPresent': 1, 'helmetAbsent': 1, 'helmetUnknown': 1}
+SAVED = {**COUNTS, 'workersNoHelmet': 1}
+
+
 class Output(unittest.TestCase):
-    refs = ['s1-t1']
+    def scene(self, **extra):
+        return {'screenText': [], 'summary': '요약', **COUNTS, 'findings': [], **extra}
 
     def test_valid(self):
-        summary, persons, screen = parse_segment(reply({'screenText': ['자막'], 'summary': ' 요약 ', 'persons': [
-            {'ref': 's1-t1', 'helmet': 'present', 'vest': 'unknown', 'evidence': '근거'},
-            {'ref': 's1-t1', 'helmet': 'absent', 'vest': 'absent', 'evidence': '중복은 처음 것만'}]}), self.refs)
-        self.assertEqual((summary, screen, len(persons)), ('요약', ['자막'], 1))
-        self.assertEqual(persons[0]['helmet'], 'present')
+        summary, counts, findings, screen = parse_segment(reply(self.scene(
+            screenText=['자막'], summary=' 요약 ', findings=[' 바닥에 누워 있는 사람 1명 ', '', '흰 안전모 작업자'])))
+        self.assertEqual((summary, screen, counts), ('요약', ['자막'], SAVED))
+        self.assertEqual(findings, ['바닥에 누워 있는 사람 1명', '흰 안전모 작업자'])
+
+    def test_counts_made_consistent(self):
+        # 안전모 합이 작업자 수보다 크면 작업자 수를, 조끼 합·쓰러진 수가 사람 수보다 크면 사람 수를 올린다.
+        _, counts, _, _ = parse_segment(reply(self.scene(people=1, vestPresent=1, helmetAbsent=4)))
+        self.assertEqual((counts['vestPresent'], counts['people'], counts['workersNoHelmet']), (6, 8, 4))
+        self.assertEqual(parse_segment(reply(self.scene(people=0, vestPresent=0, vestAbsent=0, vestUnknown=0, helmetPresent=0,
+                                                         helmetAbsent=0, helmetUnknown=0, fallen=2)))[1]['people'], 2)
+
+    def test_findings_limited(self):
+        self.assertEqual(len(parse_segment(reply(self.scene(findings=[f'사실 {i}' for i in range(10)])))[2]), 6)
 
     def test_invalid(self):
-        person = {'ref': 's1-t1', 'helmet': 'present', 'vest': 'present', 'evidence': ''}
         cases = {
-            '응답 길이 초과': reply({'summary': 's', 'persons': []}, done='length'),
+            '응답 길이 초과': reply(self.scene(), done='length'),
             'JSON 아님': reply('{"summary": "잘린'),
             '객체 아님': reply([]),
-            '요약 없음': reply({'summary': ' ', 'persons': []}),
-            '사람 목록 형식 오류': reply({'summary': 's', 'persons': {}}),
-            '화면 글자 형식 오류': reply({'summary': 's', 'persons': [], 'screenText': 'x'}),
-            '알 수 없는 사람 참조': reply({'summary': 's', 'persons': [{**person, 'ref': 's9-t9'}]}),
-            '허용되지 않은 판정값': reply({'summary': 's', 'persons': [{**person, 'helmet': 'yes'}]}),
+            '요약 없음': reply(self.scene(summary=' ')),
+            '집계 형식 오류': reply(self.scene(people=-1)),
+            '발견 사항 형식 오류': reply(self.scene(findings=[1])),
+            '화면 글자 형식 오류': reply(self.scene(screenText='x')),
         }
+        cases['집계 누락'] = reply({k: v for k, v in self.scene().items() if k != 'vestUnknown'})
+        cases['집계 참거짓'] = reply(self.scene(people=True))
         for message, response in cases.items():
+            expected = '집계 형식 오류' if message.startswith('집계') else message
             with self.assertRaises(InvalidOutput, msg=message) as caught:
-                parse_segment(response, self.refs)
-            self.assertEqual(str(caught.exception), message)
+                parse_segment(response)
+            self.assertEqual(str(caught.exception), expected)
 
 
 class Connection(unittest.TestCase):

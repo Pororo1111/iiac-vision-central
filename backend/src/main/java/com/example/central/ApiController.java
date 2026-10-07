@@ -15,11 +15,14 @@ public class ApiController {
   private final CentralMapper mapper;
   private final CentralService service;
   private final DeploymentService deployments;
+  private final StreamLeaseService streams;
 
-  public ApiController(CentralMapper mapper, CentralService service, DeploymentService deployments) {
+  public ApiController(CentralMapper mapper, CentralService service, DeploymentService deployments,
+      StreamLeaseService streams) {
     this.mapper = mapper;
     this.service = service;
     this.deployments = deployments;
+    this.streams = streams;
   }
 
   @GetMapping("/health")
@@ -63,6 +66,7 @@ public class ApiController {
   /**
    * 응답의 monitoring은 중앙이 요청한 최신 감시 명령(없으면 null)이다. IoT는 처음 보는 commandId만 적용한다.
    * deployment는 이 장치의 미완료 배포(없으면 null)로 GET /iot/deployments/desired와 같은 형식이다.
+   * streamRequest는 관리자가 시청 중인 카메라의 송출 임대(없으면 null)다. 장치당 하나만 보낸다.
    */
   @PostMapping("/iot/heartbeat")
   public Map<String, Object> heartbeat(Principal p, @Valid @RequestBody Heartbeat body) {
@@ -73,6 +77,7 @@ public class ApiController {
     response.put("deployment", deployments.desired(p.getName()));
     response.put("restart", mapper.restartCommand(p.getName()));
     response.put("logRequest", mapper.logRequestCommand(p.getName()));
+    response.put("streamRequest", streams.current(p.getName()));
     return response;
   }
 

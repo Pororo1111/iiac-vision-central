@@ -36,11 +36,11 @@ public interface DetectionMapper {
 
   @Insert("""
       INSERT INTO detection_batches(batch_id,device_id,camera_id,session_id,started_at,ended_at,model_name,tracker,rule_version,
-        frame_count,cut_count,untracked_persons,unassigned_hard_hats,unassigned_vests,payload,payload_sha256)
+        frame_count,cut_count,untracked_persons,unassigned_hard_hats,unassigned_vests,payload,payload_sha256,source)
       VALUES(#{b.batchId},#{b.deviceId},#{b.cameraId},#{b.sessionId},#{b.startedAt},#{b.endedAt},#{b.model},#{b.tracker},#{rule},
-        #{frameCount},#{cutCount},#{s.untrackedPersons},#{s.unassignedHardHats},#{s.unassignedVests},#{payload}::jsonb,#{sha})
+        #{frameCount},#{cutCount},#{s.untrackedPersons},#{s.unassignedHardHats},#{s.unassignedVests},#{payload}::jsonb,#{sha},#{source})
       ON CONFLICT (batch_id) DO NOTHING""")
-  int insertBatch(DetectionBatch b,String rule,int frameCount,int cutCount,Summary s,String payload,String sha);
+  int insertBatch(DetectionBatch b,String rule,int frameCount,int cutCount,Summary s,String payload,String sha,String source);
 
   @Insert("""
       INSERT INTO detection_tracks(batch_id,track_id,device_id,camera_id,session_id,first_seen,last_seen,frames,max_score,
@@ -51,6 +51,25 @@ public interface DetectionMapper {
 
   record Existing(String deviceId,String payloadSha256) {}
   @Select("SELECT device_id,payload_sha256 FROM detection_batches WHERE batch_id=#{id}::uuid") Existing existing(String id);
+
+  // ---- 원본 프레임(오버레이 없는 스냅샷) ----
+  record LockedBatch(String deviceId,String cameraId,String payload) {}
+  @Select("SELECT device_id,camera_id,payload::text FROM detection_batches WHERE batch_id=#{id}::uuid FOR UPDATE")
+  LockedBatch lockBatch(String id);
+  @Select("SELECT sha256 FROM detection_snapshots WHERE batch_id=#{id}::uuid AND captured_at=#{at}")
+  String snapshotSha(String id,OffsetDateTime at);
+  @Select("SELECT count(*)::int FROM detection_snapshots WHERE batch_id=#{id}::uuid") int snapshotCount(String id);
+  @Insert("""
+      INSERT INTO detection_snapshots(batch_id,captured_at,sha256,size_bytes,width,height)
+      VALUES(#{id}::uuid,#{at},#{sha},#{size},#{width},#{height})""")
+  void insertSnapshot(String id,OffsetDateTime at,String sha,int size,int width,int height);
+  @Select("SELECT EXISTS(SELECT 1 FROM detection_batches WHERE batch_id=#{id}::uuid)") boolean batchExists(String id);
+
+  /** 최근 24시간 안에 장치가 직접 보낸 배치가 있으면 색인 워커는 그 카메라를 다시 탐지하지 않는다. */
+  @Select("""
+      SELECT EXISTS(SELECT 1 FROM detection_batches WHERE device_id=#{deviceId} AND camera_id=#{cameraId}
+        AND source='IOT' AND received_at>now()-interval '24 hours')""")
+  boolean iotActive(String deviceId,String cameraId);
 
   /** [from,to)와 겹치는 추적 요약. 순서는 첫 관찰 시각·배치·추적 ID로 고정한다. */
   @Select("""

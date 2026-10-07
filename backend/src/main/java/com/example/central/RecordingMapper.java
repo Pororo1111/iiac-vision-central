@@ -15,11 +15,11 @@ public interface RecordingMapper {
       extract(epoch FROM ended_at-started_at)::float8 AS duration_seconds,source,sha256,size_bytes,created_at""";
 
   @Select(value="""
-      INSERT INTO recordings(id,device_id,camera_id,started_at,ended_at,sha256,size_bytes)
-      VALUES(#{id}::uuid,#{deviceId},#{cameraId},#{startedAt},#{endedAt},#{sha256},#{sizeBytes})
+      INSERT INTO recordings(id,device_id,camera_id,started_at,ended_at,source,sha256,size_bytes)
+      VALUES(#{id}::uuid,#{deviceId},#{cameraId},#{startedAt},#{endedAt},#{source},#{sha256},#{sizeBytes})
       ON CONFLICT (device_id,camera_id,started_at) DO NOTHING RETURNING id::text""",affectData=true)
   String insert(String id,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,
-      String sha256,long sizeBytes);
+      String source,String sha256,long sizeBytes);
 
   @Select("SELECT "+COLUMNS+" FROM recordings WHERE id=#{id}::uuid") Recording view(String id);
 

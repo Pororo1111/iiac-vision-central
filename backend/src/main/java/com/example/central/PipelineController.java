@@ -27,6 +27,9 @@ public class PipelineController {
   @PostMapping("/api/training/auto-pipeline/run") public ResponseEntity<View> runAuto() { return ResponseEntity.accepted().body(service.runAutoNow()); }
   @GetMapping("/api/training/base-models") public List<TrainingModels.BaseModel> baseModels() { return service.baseModels(); }
   @GetMapping("/api/training/external-datasets") public List<External> externals() { return service.externals(); }
+  @GetMapping("/api/training/external-datasets/lineage") public Map<String,List<String>> lineage(@RequestParam(required=false) String baseModel) {
+    return Map.of("inBase",service.lineageExternal(baseModel));
+  }
   @PostMapping("/api/training/external-datasets") public ResponseEntity<External> requestExternal(@Valid @RequestBody ExternalRequest body) {
     return ResponseEntity.accepted().body(service.requestExternal(body.url()));
   }

@@ -21,7 +21,7 @@ class DeviceDiagnostics(unittest.TestCase):
         return Session().call('POST', '/iot/heartbeat', body, self.iot)
 
     def test_monitoring_ack_and_error(self):
-        self.assertEqual(self.beat()[1], {'accepted': True, 'monitoring': None, 'deployment': None, 'restart': None, 'logRequest': None})
+        self.assertEqual(self.beat()[1], {'accepted': True, 'monitoring': None, 'deployment': None, 'restart': None, 'logRequest': None, 'streamRequest': None})
         self.admin.call('POST', self.path + '/monitoring', {'action': 'RESUME'}, self.csrf)
         command = self.beat('STOPPED')[1]['monitoring']['commandId']
         device = self.admin.call('GET', self.path)[1]

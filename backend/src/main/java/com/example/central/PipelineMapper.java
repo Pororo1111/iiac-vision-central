@@ -18,6 +18,14 @@ public interface PipelineMapper {
   External sameExternal(String workspace,String project,Integer version);
   @Select("SELECT "+EXT_ADMIN+" FROM external_datasets ORDER BY created_at DESC,id LIMIT 30") List<External> externals();
   @Select("SELECT "+EXT_ADMIN+" FROM external_datasets WHERE id=#{id}::uuid") External external(String id);
+  @Select("""
+      WITH RECURSIVE chain(id,base,depth) AS (
+        SELECT id,base_model,0 FROM training_runs WHERE id=#{id}::uuid
+        UNION ALL
+        SELECT r.id,r.base_model,c.depth+1 FROM chain c JOIN training_runs r
+          ON c.base LIKE 'release:%' AND r.id::text=substring(c.base FROM 9) WHERE c.depth<50)
+      SELECT DISTINCT e->>'id' FROM chain c JOIN training_runs t ON t.id=c.id CROSS JOIN jsonb_array_elements(t.external) e""")
+  List<String> lineageExternal(String id);
   @Select("SELECT yaml_path FROM external_datasets WHERE id=#{id}::uuid AND status='READY'") String externalPath(String id);
   @Select(value="""
       UPDATE external_datasets SET status='RUNNING',lease_token=#{token}::uuid,lease_until=now()+interval '120 seconds'
@@ -70,15 +78,20 @@ public interface PipelineMapper {
   @Select("SELECT id::text FROM pipelines WHERE source_kind='AUTO' ORDER BY created_at DESC,id LIMIT 1") String latestAuto();
   @Select("SELECT count(*) FROM labeling_jobs WHERE status IN ('QUEUED','RUNNING')") long labelingQueued();
 
-  /** 학습이 끝났거나(평가 완료·실패) 학습 전에 멈춘 파이프라인 중 이름이 없는 것 하나를 5분간 임대한다. */
+  /** 이름이 없는 파이프라인 하나를 5분간 임대한다. 학습 실행을 만들기 전에 이름을 먼저 정한다. */
   @Select(value="""
       UPDATE pipelines SET name_status='GENERATING',name_lease_until=now()+interval '5 minutes'
-      WHERE id=(SELECT p.id FROM pipelines p LEFT JOIN training_runs r ON r.id=p.run_id
-        WHERE (p.name_status='PENDING' OR (p.name_status='GENERATING' AND p.name_lease_until<now()))
-          AND (r.state IN ('EVALUATED','FAILED') OR p.stage IN ('FAILED','CANCELLED'))
-        ORDER BY p.created_at,p.id FOR UPDATE OF p SKIP LOCKED LIMIT 1)
+      WHERE id=(SELECT p.id FROM pipelines p
+        WHERE p.name_status='PENDING' OR (p.name_status='GENERATING' AND p.name_lease_until<now())
+        ORDER BY p.created_at,p.id FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING id::text""",affectData=true)
   String claimNaming();
+  /** 학습 직전 이름 대기 기한(3분)을 정한다. 워커가 임대하면 임대 기한으로 바뀐다. */
+  @Update("UPDATE pipelines SET name_lease_until=now()+interval '3 minutes' WHERE id=#{id}::uuid AND name_status='PENDING' AND name_lease_until IS NULL")
+  void nameDeadline(String id);
+  /** 대기·임대 기한이 지나도록 이름이 없으면 규칙 이름을 쓴다. */
+  @Update("UPDATE pipelines SET name=#{name},name_status='DONE',name_lease_until=null,updated_at=now() WHERE id=#{id}::uuid AND name_status<>'DONE' AND name_lease_until<now()")
+  int fallbackNamed(String id,String name);
   @Select("SELECT count(*) FROM pipelines WHERE name=#{name} AND id<>#{id}::uuid") int sameName(String id,String name);
   @Update("UPDATE pipelines SET name=#{name},name_status='DONE',name_lease_until=null,updated_at=now() WHERE id=#{id}::uuid AND name_status='GENERATING'")
   int named(String id,String name);

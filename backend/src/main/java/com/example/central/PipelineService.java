@@ -96,6 +96,11 @@ public class PipelineService {
     db.expireExternal();
     return db.externals().stream().filter(e -> !inBaseline(e.workspace(),e.project(),e.version())).toList();
   }
+  /** 베이스 모델(release:실행 id)의 학습 계보에서 쓴 외부 데이터셋 id. 이어받기로 이미 포함되므로 화면이 다시 고르지 않게 표시한다. */
+  public List<String> lineageExternal(String baseModel) {
+    if(baseModel==null || !baseModel.matches("release:[0-9a-f-]{36}")) return List.of();
+    return db.lineageExternal(baseModel.substring(8));
+  }
   public External claimExternal() { db.expireExternal(); return db.claimExternal(UUID.randomUUID().toString()); }
   public void heartbeatExternal(String id,String lease) { require(db.heartbeatExternal(id,lease)==1,"LEASE_EXPIRED"); }
   public void progressExternal(String id,ExternalBeat beat) {
@@ -135,15 +140,19 @@ public class PipelineService {
       default -> { }
     }
     require(new HashSet<>(request.external().stream().map(ExternalChoice::id).toList()).size()==request.external().size(),"DUPLICATE_EXTERNAL");
+    int remote=0;
     for(var choice:request.external()) {
       var external=db.external(choice.id().toString());
       require(external!=null && !external.status().equals("FAILED"),"EXTERNAL_NOT_AVAILABLE");
+      if(!external.url().startsWith("local:")) remote++;
       require(!inBaseline(external.workspace(),external.project(),external.version()),"ALREADY_IN_BASELINE");
     }
+    // 로보플로우 데이터셋은 외부 라벨 보정·상한이 있어 5개까지, 직접 확인한 로컬 보강 데이터셋(local:)은 개수 제한이 없다.
+    require(remote<=5,"TOO_MANY_EXTERNAL");
     String base=request.options().baseModel();
     if(base.startsWith("release:")) require(runs.released(base.substring(8))==1,"BASE_MODEL_NOT_FOUND");
     String id=UUID.randomUUID().toString();
-    // 이름은 학습이 끝난 뒤 Gemma가 추천한다. 그때까지 임시 이름을 쓴다.
+    // 이름은 학습 실행을 만들기 전에 Gemma가 추천한다. 그때까지 임시 이름을 쓴다.
     db.insert(id,"이름 생성 대기",request.sourceKind(),json.writeValueAsString(source),
       json.writeValueAsString(request.external()),json.writeValueAsString(request.options()),user);
     // 즉시 진행할 수 있으면 진행하고, 실패하면 주기 진행에서 다시 시도한다.
@@ -206,14 +215,20 @@ public class PipelineService {
   }
 
   // ---- Gemma 이름 추천 ----
+  /** 학습 전 이름 추천에 쓸 계획 정보(수집 방식·대상 규모·외부 데이터·학습 옵션)를 넘긴다. 결과·성능은 아직 없다. */
   public NamingJob claimNaming() {
     String id=db.claimNaming();
     if(id==null) return null;
     var p=db.pipeline(id);
     var context=new LinkedHashMap<String,Object>();
     context.put("sourceKind",p.sourceKind());
-    context.put("stage",p.stage());
-    context.put("images",p.sampleCount());
+    var source=json.readValue(p.source(),Source.class);
+    switch(p.sourceKind()) {
+      case "IOT" -> { context.put("devices",source.deviceIds()==null?0:source.deviceIds().size()); context.put("targetImages",source.targetCount()); }
+      case "UPLOAD" -> { context.put("uploadedImages",ids(source.sampleIds()).size()); context.put("videoImports",ids(source.importIds()).size()); }
+      case "AUTO" -> context.put("newIotImages",Math.min(runs.unusedIotCount(),AUTO_LIMIT));
+      default -> { }
+    }
     context.put("options",json.readTree(p.options()));
     var names=new ArrayList<String>();
     for(var choice:json.readValue(p.external(),ExternalChoice[].class)) {
@@ -221,27 +236,27 @@ public class PipelineService {
       if(external!=null) names.add(external.workspace()+"/"+external.project()+(external.version()==null?"":" v"+external.version()));
     }
     context.put("roboflow",names);
-    if(p.runId()!=null) {
-      var run=runs.run(p.runId());
-      var summary=json.readTree(run.summary());
-      context.put("runState",run.state());
-      context.put("selected",summary.path("selected"));
-      context.put("siteSplit",summary.path("site"));
-      context.put("deltaMap50_95",summary.path("evaluation").path("deltaMap50_95"));
-      context.put("eligible",summary.path("evaluation").path("eligibleForPromotion"));
-      context.put("error",summary.path("error"));
-    } else context.put("message",p.message());
     return new NamingJob(id,json.writeValueAsString(context));
   }
   public void name(String id,String name) {
     String value=name.strip().replaceAll("\\s+"," ");
     if(value.length()>40) value=value.substring(0,40).strip();
     require(!value.isEmpty(),"INVALID_NAME");
-    String unique=value;
-    for(int n=2;db.sameName(id,unique)>0 && n<100;n++) unique=value+" #"+n;
+    String unique=unique(id,value);
     require(db.named(id,unique)==1,"NAMING_LEASE_LOST");
     var p=db.pipeline(id);
     if(p.runId()!=null) db.renameRun(p.runId(),unique);
+  }
+  String unique(String id,String value) {
+    String unique=value;
+    for(int n=2;db.sameName(id,unique)>0 && n<100;n++) unique=value+" #"+n;
+    return unique;
+  }
+  static final Map<String,String> NAME_SOURCE=Map.of("IOT","IoT","UPLOAD","업로드","EXISTING","기존수집","ROBOFLOW","Roboflow","AUTO","자동");
+  static final Map<String,String> NAME_BASE=Map.of("default","PPE4","yolo26n","Y26n","yolo26m","Y26m");
+  /** Gemma 추천을 받지 못했을 때의 규칙 이름. ai-worker/naming.py fallback과 같은 형식이다. */
+  static String fallbackName(String sourceKind,Options options) {
+    return NAME_SOURCE.getOrDefault(sourceKind,"학습")+"-"+NAME_BASE.getOrDefault(options.baseModel(),"후보이어")+"-"+options.epochs()+"ep";
   }
 
   public void cancel(String id) {
@@ -327,8 +342,9 @@ public class PipelineService {
           db.progress(id,"FAILED",null,total,labeled,"로보플로우 데이터셋을 불러오지 못했습니다: "+(external==null?"없음":external.error()));return;
         }
         if(!external.status().equals("READY")) { db.progress(id,stage,null,total,labeled,"로보플로우 데이터셋 내려받는 중");return; }
+        // local: 데이터셋은 직접 검토해 등록한 소량 보강 자료라 외부 상한 없이 전부 넣는다(add_external).
         snapshot.add(Map.of("id",external.id(),"name",external.name(),"yamlPath",db.externalPath(external.id()),
-          "mapping",json.readTree(external.mapping())));
+          "mapping",json.readTree(external.mapping()),"reviewed",external.url().startsWith("local:")));
       }
       List<String> sampleIds=p.sourceKind().equals("AUTO")?runs.unusedIot(AUTO_LIMIT):p.sourceKind().equals("EXISTING")?runs.unusedLabeled(200)
         :p.sourceKind().equals("ROBOFLOW")?List.of():members.stream().filter(m -> m.status().equals("LABELED")).map(Member::id).toList();
@@ -337,7 +353,17 @@ public class PipelineService {
         db.progress(id,"FAILED",null,total,labeled,"학습에 사용할 라벨링 완료 이미지가 없습니다.");return;
       }
       if(runs.activeTasks()>0) { db.progress(id,stage,null,total,labeled,"다른 학습 작업이 끝나기를 기다리는 중");return; }
-      var run=training.create(p.name(),sampleIds.stream().map(UUID::fromString).toList(),options.confidence(),
+      // 학습 실행 이름은 파이프라인 이름을 따르므로 Gemma 이름이 정해진 뒤에 만든다. 기한이 지나면 규칙 이름을 쓴다.
+      String name=p.name();
+      if(!p.nameStatus().equals("DONE")) {
+        String fallback=unique(id,fallbackName(p.sourceKind(),options));
+        if(db.fallbackNamed(id,fallback)==0) {
+          db.nameDeadline(id);
+          db.progress(id,stage,null,total,labeled,"Gemma가 모델 이름을 정하는 중");return;
+        }
+        name=fallback;
+      }
+      var run=training.create(name,sampleIds.stream().map(UUID::fromString).toList(),options.confidence(),
         new Auto(options.epochs(),null),options.baseModel(),json.writeValueAsString(snapshot));
       db.progress(id,"RUN",run.id(),total,labeled,"학습 실행을 만들었습니다.");
     });

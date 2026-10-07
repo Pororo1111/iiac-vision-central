@@ -205,7 +205,7 @@ class Pipelines(unittest.TestCase):
         self.assertIn('로보플로우', view['pipeline']['message'])
 
     def test_gemma_naming(self):
-        # 외부 데이터셋 실패로 학습 전에 멈춘 파이프라인도 실행 중인 워커가 Gemma로 이름을 붙인다.
+        # 학습 실행을 만들기 전(외부 데이터셋 대기 중)에도 실행 중인 워커가 Gemma로 이름을 먼저 붙인다.
         external = str(uuid.uuid4()); self.externals.append(external)
         sql(f"""INSERT INTO external_datasets(id,url,workspace,project,version,status,error)
                 VALUES('{external}','https://universe.roboflow.com/verify/naming','verify','naming',1,'READY','')""")
@@ -216,10 +216,13 @@ class Pipelines(unittest.TestCase):
         sql(f"UPDATE external_datasets SET status='RUNNING',lease_token=gen_random_uuid(),lease_until=now()+interval '1 hour' WHERE id='{external}'")
         status, view = self.create({'sourceKind': 'ROBOFLOW', 'source': {}, 'external': [{'id': external}],
                                     'options': {'baseModel': 'yolo26n', 'epochs': 3, 'confidence': 0.6}})
-        self.assertEqual((status, view['pipeline']['name'], view['pipeline']['nameStatus']), (202, '이름 생성 대기', 'PENDING'))
+        self.assertEqual((status, view['pipeline']['name']), (202, '이름 생성 대기'))
+        self.assertIn(view['pipeline']['nameStatus'], ('PENDING', 'GENERATING'))
         pipeline = view['pipeline']['id']
-        sql(f"UPDATE external_datasets SET status='FAILED',error='검증용 실패' WHERE id='{external}'")
         named = wait(lambda: (v := self.view(pipeline))['pipeline']['nameStatus'] == 'DONE' and v, 180)
+        self.assertEqual(named['pipeline']['stage'], 'DATASET')
+        self.assertIsNone(named['run'])
+        sql(f"UPDATE external_datasets SET status='FAILED',error='검증용 실패' WHERE id='{external}'")
         self.assertTrue(named, 'AI 워커·Ollama 실행 여부를 확인하세요.')
         self.assertNotEqual(named['pipeline']['name'], '이름 생성 대기')
         self.assertLessEqual(len(named['pipeline']['name']), 44)

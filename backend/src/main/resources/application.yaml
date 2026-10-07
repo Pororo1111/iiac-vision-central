@@ -29,7 +29,21 @@ mybatis:
 app:
   worker-token: ${AI_WORKER_TOKEN:}
   media-public-url: ${MEDIA_PUBLIC_URL:http://127.0.0.1:8889}
+  media-api-url: ${MEDIA_API_URL:http://127.0.0.1:9997}
+  # 녹화 클립 재생 서버(MediaMTX playback)와 송출 지연 보정. 녹화 시각은 중앙 수신 기준이라 장치 촬영 시각보다
+  # 송출 지연만큼 늦다. 클립 시작을 이만큼 늦춰 장치 시각의 장면에 맞춘다.
+  # 2026-10-05 test-video-0 침입 3건에서 원본 이미지와 클립 프레임을 대조해 1.2~2.0초(중앙값 1.6초)로 측정했다.
+  media-playback-url: ${MEDIA_PLAYBACK_URL:http://127.0.0.1:9996}
+  stream-latency-ms: ${STREAM_LATENCY_MS:1600}
   media-root: ${MEDIA_ROOT:/app/data}
+  # 오탐 확인 관리자 승인 데이터셋(local:admin-fp) 폴더와 검토 대상에서 뺄 카메라(쉼표 구분, * 패턴)
+  review:
+    dataset-root: ${REVIEW_DATASET_ROOT:${MEDIA_ROOT:/app/data}/admin-fp}
+    exclude-cameras: ${REVIEW_EXCLUDE_CAMERAS:test-video*}
+  stream-lease:
+    # 관리자 카메라 보기의 송출 임대 길이와 같은 시청자의 최소 연장 간격(초)
+    ttl-seconds: ${STREAM_LEASE_TTL_SECONDS:60}
+    min-extend-seconds: ${STREAM_LEASE_MIN_EXTEND_SECONDS:10}
   training-runs-root: ${TRAINING_RUNS_ROOT:}
   base-model-path: ${BASE_MODEL_PATH:}
   admin-username: ${ADMIN_USERNAME}

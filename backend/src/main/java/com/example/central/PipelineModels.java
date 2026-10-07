@@ -28,7 +28,7 @@ public final class PipelineModels {
       @DecimalMin("0.5") @DecimalMax("0.95") double confidence) {}
   /** name은 쓰지 않는다. 학습 후 Gemma가 이름을 추천한다. */
   public record Create(@Size(max=100) String name,@NotNull @Pattern(regexp="IOT|UPLOAD|EXISTING|ROBOFLOW") String sourceKind,
-      @NotNull @Valid Source source,@NotNull @Size(max=5) List<@NotNull @Valid ExternalChoice> external,@NotNull @Valid Options options) {}
+      @NotNull @Valid Source source,@NotNull @Size(max=30) List<@NotNull @Valid ExternalChoice> external,@NotNull @Valid Options options) {}
 
   public record Pipeline(String id,String name,String sourceKind,String source,String external,String options,String stage,String runId,
       int sampleCount,int labeledCount,String message,String createdBy,OffsetDateTime createdAt,OffsetDateTime updatedAt,String nameStatus) {}

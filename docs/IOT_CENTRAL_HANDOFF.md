@@ -152,3 +152,10 @@ IoT 기존 채팅에서 명시적 CLI 배포 클라이언트를 구현했다. �
 - 수집 화면 브라우저 검증은 완료하지 않았다. 원격 Node가 없어 화면 스크립트 검사도 실행하지 못했다.
 - 마지막 원격 상태 조회는 `paused`, `enabled=false`, `/ready` 503이었다. 운영 smoke test 미통과를 기록하며 감시 재개나 서비스 재시작으로 해결하지 않았다.
 - 중앙 미커밋 변경을 보존한다. 추가 구현·현장 적용은 중단했고 [개발 현황](DEVELOPMENT_PLAN.md)의 순서로 재개한다.
+
+## 2026-10-04: 시청 중에만 송출(송출 임대)
+
+- 중앙 구현 완료: V27 `stream_leases`·`stream_lease_viewers`, 관리자 `POST/DELETE /api/devices/{deviceId}/cameras/{cameraId}/stream-lease`, heartbeat 응답 `streamRequest`. 계약은 `docs/API.md` 송출 임대 절.
+- 테스트 영상 경로 `devices/{deviceId}/test-video-0` publish는 기존 규칙(`devices/{인증 장치}/[A-Za-z0-9_-]{1,64}`)으로 허용되며, 카메라 상태는 `(deviceId, cameraId)`별로 따로 저장된다.
+- 실제 장치 확인(로컬 개발, `test-video-0`): 창 열기 → 재생 8.2~9.6초(4회), 창 닫기 → 카메라 `OFFLINE` 8~9초. IoT 쪽 임대 반응은 이미 동작했다. 하루 상한·IoT 화면 수동 중지 후 무시 시간은 중앙에서 검증하지 않았다.
+

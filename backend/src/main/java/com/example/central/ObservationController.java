@@ -44,8 +44,9 @@ public class ObservationController {
   public List<SegmentView> search(@RequestParam(required=false) String deviceId,@RequestParam(required=false) String cameraId,
       @RequestParam(required=false) @DateTimeFormat(iso=DateTimeFormat.ISO.DATE_TIME) OffsetDateTime from,
       @RequestParam(required=false) @DateTimeFormat(iso=DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to,
-      @RequestParam(required=false) String helmet,@RequestParam(required=false) String vest,@RequestParam(required=false) String text) {
-    var filter=new Filter(deviceId,cameraId,from,to,helmet,vest,text);
+      @RequestParam(required=false) String helmet,@RequestParam(required=false) String vest,@RequestParam(required=false) String text,
+      @RequestParam(required=false) Boolean fallen) {
+    var filter=new Filter(deviceId,cameraId,from,to,helmet,vest,text,fallen,null);
     if((deviceId!=null && !deviceId.matches(ObservationService.ID)) || (cameraId!=null && !cameraId.matches(ObservationService.ID))
         || (helmet!=null && !ObservationService.STATES.contains(helmet)) || (vest!=null && !ObservationService.STATES.contains(vest))
         || (text!=null && text.length()>100))

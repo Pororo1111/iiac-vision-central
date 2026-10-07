@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -61,8 +62,12 @@ class ObserverRecovery(unittest.TestCase):
                                                  registrar.probe(VIDEO)['durationSeconds'])
         assert code == 200, cls.recording
         sim = load('simulate_video_iot', 'simulate-video-iot.py')
-        for batch in sim.batches(sim.analyze(), cls.fixture.id, cls.camera, cls.start, uuid.uuid4()):
+        cls.batches = sim.batches(sim.analyze(), cls.fixture.id, cls.camera, cls.start, uuid.uuid4())
+        for batch in cls.batches:
             assert sim.send(batch, cls.fixture.token)[0] == 200
+            assert all(c == 200 for c in sim.send_snapshots(batch, cls.fixture.token, cls.start))
+        # 사람이 한 번도 탐지되지 않은 구간(로고 화면)은 받을 때 바로 SKIPPED(no_person)다.
+        cls.no_person = sum(1 for b in cls.batches if not sim.snapshot_picks(b))
         cls.admin = Session(); assert cls.admin.login()[0] == 200
 
     @classmethod
@@ -80,6 +85,7 @@ class ObserverRecovery(unittest.TestCase):
                 (DATA / 'media/recordings' / (str(uuid.UUID(recording)) + '.mp4')).unlink(missing_ok=True)
             for batch in batches:
                 (DATA / 'media/observations' / (str(uuid.UUID(batch)) + '.jpg')).unlink(missing_ok=True)
+                shutil.rmtree(DATA / 'media/detection-snapshots' / str(uuid.UUID(batch)), ignore_errors=True)
         subprocess.run([sys.executable, str(ROOT / 'scripts/dev.py'), 'start'], stdout=subprocess.DEVNULL, check=False)
 
     # ---- 도우미 ----
@@ -121,7 +127,7 @@ class ObserverRecovery(unittest.TestCase):
     def test_1_ollama_down_does_not_consume_jobs(self):
         process, log = self.observer(OLLAMA_URL='http://127.0.0.1:9')
         time.sleep(8)
-        self.assertEqual(self.statuses(), {'QUEUED': 9})
+        self.assertEqual(self.statuses(), {'QUEUED': 9 - self.no_person, **({'SKIPPED': self.no_person} if self.no_person else {})})
         self.assertTrue(all(r['attempts'] == '0' for r in self.rows()))
         self.assertIn('응답 없음', open(log).read())
         # 워커가 질문을 가져가지 않으면 60초 뒤 서버가 실패로 알린다(시간 경과는 created_at을 당겨 흉내 낸다).

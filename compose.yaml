@@ -28,6 +28,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       AI_WORKER_TOKEN: ${AI_WORKER_TOKEN:-}
       MEDIA_PUBLIC_URL: ${MEDIA_PUBLIC_URL:-http://127.0.0.1:8889}
+      MEDIA_API_URL: http://media:9997
     ports:
       - '127.0.0.1:8201:8080'
     volumes:

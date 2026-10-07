@@ -15,10 +15,12 @@ import org.springframework.web.bind.annotation.*;
 public class MediaController {
   private final CentralMapper mapper;
   private final MediaService media;
+  private final StreamLeaseService streams;
 
-  public MediaController(CentralMapper mapper, MediaService media) {
+  public MediaController(CentralMapper mapper, MediaService media, StreamLeaseService streams) {
     this.mapper = mapper;
     this.media = media;
+    this.streams = streams;
   }
 
   @PostMapping("/api/iot/cameras/status")
@@ -42,6 +44,26 @@ public class MediaController {
       @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
       @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String cameraId) {
     return media.create(deviceId, cameraId);
+  }
+
+  /** 카메라 보기를 연 창(viewerId)의 송출 임대 생성·연장. 화면은 30초마다 연장한다. */
+  @PostMapping("/api/devices/{deviceId}/cameras/{cameraId}/stream-lease")
+  public StreamRequest acquireLease(
+      @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
+      @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String cameraId,
+      @Valid @RequestBody StreamLeaseRequest body,
+      Principal principal) {
+    return streams.acquire(deviceId, cameraId, principal.getName(), body.viewerId());
+  }
+
+  @DeleteMapping("/api/devices/{deviceId}/cameras/{cameraId}/stream-lease")
+  public ResponseEntity<Void> releaseLease(
+      @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
+      @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String cameraId,
+      @RequestParam java.util.UUID viewerId,
+      Principal principal) {
+    streams.release(deviceId, cameraId, principal.getName(), viewerId);
+    return ResponseEntity.noContent().build();
   }
 
   @PostMapping("/internal/media/auth")

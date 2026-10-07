@@ -33,6 +33,12 @@ public class RecordingService {
   static ResponseStatusException error(HttpStatus status,String code) { return new ResponseStatusException(status,code); }
 
   public Recording register(MultipartFile file,String deviceId,String cameraId,OffsetDateTime startedAt,double duration) throws Exception {
+    return register(file,deviceId,cameraId,startedAt,duration,"FILE");
+  }
+
+  /** source: FILE(파일 등록) 또는 STREAM(장치 송출의 MediaMTX 분할 녹화). */
+  public Recording register(MultipartFile file,String deviceId,String cameraId,OffsetDateTime startedAt,double duration,String source) throws Exception {
+    if(!"FILE".equals(source) && !"STREAM".equals(source)) throw error(HttpStatus.BAD_REQUEST,"INVALID_SOURCE");
     if(deviceId==null || !deviceId.matches(ID) || cameraId==null || !cameraId.matches(ID)) throw error(HttpStatus.BAD_REQUEST,"INVALID_CAMERA");
     if(startedAt==null || !(duration>0 && duration<=86400)) throw error(HttpStatus.BAD_REQUEST,"INVALID_DURATION");
     if(file==null || file.isEmpty() || file.getSize()>MAX_FILE) throw error(HttpStatus.BAD_REQUEST,"INVALID_VIDEO_SIZE");
@@ -60,7 +66,7 @@ public class RecordingService {
     } finally { Files.deleteIfExists(temp); }
 
     String inserted;
-    try { inserted=db.insert(id,deviceId,cameraId,start,end,sha,file.getSize()); }
+    try { inserted=db.insert(id,deviceId,cameraId,start,end,source,sha,file.getSize()); }
     catch(RuntimeException e) { Files.deleteIfExists(destination); throw e; }
     if(inserted!=null) return db.view(id);
     // 같은 파일·길이의 재등록은 기존 녹화를 돌려준다. 내용이 다르면 덮어쓰지 않는다.

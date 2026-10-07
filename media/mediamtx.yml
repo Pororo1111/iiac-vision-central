@@ -7,12 +7,18 @@ authHTTPExclude:
   - action: api
   - action: metrics
   - action: pprof
+  # 재생 서버는 127.0.0.1에만 열고 관리자 인증은 중앙(GET /api/clips)이 한다.
+  - action: playback
 
 api: true
 apiAddress: 127.0.0.1:9997
 metrics: true
 metricsAddress: 127.0.0.1:9998
 pprof: false
+
+# 녹화 클립 재생 서버. 중앙이 [시각−앞, 시각+뒤] 구간을 여러 분할 파일에 걸쳐 이어 붙인 fMP4로 받아 관리자에게 전달한다.
+playback: true
+playbackAddress: 127.0.0.1:9996
 
 # 사설망 주소(RTMP·ICE 바인딩, 허용 출처)는 .env의 MEDIA_HOST·PUBLIC_ORIGIN을 dev.py가 MTX_* 환경변수로 덮어쓴다.
 rtsp: false
@@ -33,6 +39,16 @@ webrtcAdditionalHosts: []
 
 pathDefaults:
   record: false
+  # 장치 송출을 1분 단위 fMP4로 녹화한다. dev.py가 MTX_PATHDEFAULTS_RECORDPATH로 절대 경로를 준다.
+  # 분할 파일은 ai-worker/stream_indexer.py가 중앙 녹화로 복사·등록한다. 클립 재생(/api/clips)은 MediaMTX 사본을 쓰므로 7일 보존한다.
+  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 60s
+  recordDeleteAfter: 168h
 
 paths:
+  # 장치 카메라 경로만 녹화한다(devices/{deviceId}/{cameraId}).
+  "~^devices/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$":
+    record: true
   all_others:

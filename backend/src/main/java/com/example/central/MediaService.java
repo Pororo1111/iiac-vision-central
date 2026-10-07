@@ -1,7 +1,12 @@
 package com.example.central;
 
 import com.example.central.Models.*;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Base64;
@@ -17,12 +22,16 @@ public class MediaService {
 
   private final CentralMapper mapper;
   private final String publicUrl;
+  private final String apiUrl;
+  private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(1)).build();
   private final SecureRandom random = new SecureRandom();
   private final ConcurrentHashMap<String, Grant> grants = new ConcurrentHashMap<>();
 
-  public MediaService(CentralMapper mapper, @Value("${app.media-public-url}") String publicUrl) {
+  public MediaService(CentralMapper mapper, @Value("${app.media-public-url}") String publicUrl,
+      @Value("${app.media-api-url:http://127.0.0.1:9997}") String apiUrl) {
     this.mapper = mapper;
     this.publicUrl = publicUrl.replaceAll("/+$", "");
+    this.apiUrl = apiUrl.replaceAll("/+$", "");
   }
 
   public ViewSession create(String deviceId, String cameraId) {
@@ -30,7 +39,8 @@ public class MediaService {
     var camera = mapper.camera(deviceId, cameraId);
     if (device == null || camera == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "CAMERA_NOT_FOUND");
     if (!device.online()) throw new ResponseStatusException(HttpStatus.CONFLICT, "DEVICE_OFFLINE");
-    if (!"STREAMING".equals(camera.streamStatus())) {
+    // IoT의 카메라 상태 보고는 publish보다 몇 초 늦을 수 있어 MediaMTX에 경로 준비 여부를 직접 확인한다.
+    if (!"STREAMING".equals(camera.streamStatus()) && !published(streamPath(deviceId, cameraId))) {
       throw new ResponseStatusException(HttpStatus.CONFLICT, "STREAM_NOT_READY");
     }
     purge();
@@ -70,6 +80,21 @@ public class MediaService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "INVALID_CAMERA");
     }
     return "devices/" + deviceId + "/" + cameraId;
+  }
+
+  /** MediaMTX 제어 API(loopback, 인증 제외)로 publish가 준비된 경로인지 확인한다. 실패하면 준비 안 됨으로 본다. */
+  boolean published(String path) {
+    try {
+      var request = HttpRequest.newBuilder(URI.create(apiUrl + "/v3/paths/get/" + path))
+          .timeout(Duration.ofSeconds(1)).GET().build();
+      var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+      return response.statusCode() == 200 && response.body().matches("(?s).*\"ready\"\\s*:\\s*true.*");
+    } catch (java.io.IOException | IllegalArgumentException e) {
+      return false;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
   }
 
   private void purge() {

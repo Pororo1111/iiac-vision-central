@@ -26,27 +26,44 @@ public class ObservationService {
   final RecordingMapper recordings;
   final RecordingService recordingFiles;
   final ObjectMapper json;
+  final DetectionService detections;
+  final MediaPlayback playback;
+  final FpCheckService fpChecks;
   final Path thumbnails;
   static final int MAX_THUMBNAIL=300*1024, MAX_TRACE=16*1024;
 
   public ObservationService(ObservationMapper db,RecordingMapper recordings,RecordingService recordingFiles,ObjectMapper json,
+      DetectionService detections,MediaPlayback playback,FpCheckService fpChecks,
       @org.springframework.beans.factory.annotation.Value("${app.media-root:/app/data}") String root) {
-    this.db=db;this.recordings=recordings;this.recordingFiles=recordingFiles;this.json=json;
+    this.db=db;this.recordings=recordings;this.recordingFiles=recordingFiles;this.json=json;this.detections=detections;this.playback=playback;
+    this.fpChecks=fpChecks;
     this.thumbnails=Path.of(root).toAbsolutePath().normalize().resolve("observations");
   }
   static ResponseStatusException error(HttpStatus status,String code) { return new ResponseStatusException(status,code); }
 
   // ---- 구간 분석 작업 ----
+  /**
+   * frameSource=SNAPSHOT이면 snapshots(장치가 보낸 오버레이 없는 원본 프레임)으로 판정하고, RECORDING이면 녹화 구간
+   * [offsetSeconds, offsetSeconds+durationSeconds)에서 프레임을 뽑는다. 원본 프레임만 있고 녹화가 아직 없으면 recording*는 null이다.
+   */
   public record Job(String batchId,String leaseToken,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,
-      String recordingId,String recordingPath,double offsetSeconds,double durationSeconds,Object detections,List<YoloTrack> tracks,
-      int attempt) {}
+      String recordingId,String recordingPath,Double offsetSeconds,Double durationSeconds,Object detections,List<YoloTrack> tracks,
+      int attempt,String frameSource,List<Snapshot> snapshots) {}
+  public record Snapshot(OffsetDateTime at,String path) {}
   public record Lease(@NotBlank String leaseToken) {}
   public record PersonResult(@NotBlank @Size(max=32) String trackId,@NotBlank String helmet,@NotBlank String vest,
       @NotNull @Size(max=1000) String evidence) {}
   public record Completion(@NotBlank String leaseToken,@NotBlank @Pattern(regexp="COMPLETED|SKIPPED") String status,
       @Size(max=2000) String summary,@Size(max=200) String skipReason,@NotNull @Size(max=50) List<@Valid PersonResult> persons,
       @NotBlank @Size(max=64) String model,@NotBlank @Size(max=32) String promptVersion,Integer frameCount,Integer elapsedMs,
-      @Size(max=MAX_THUMBNAIL*2) String thumbnail) {}
+      @Size(max=MAX_THUMBNAIL*2) String thumbnail,@Pattern(regexp="SNAPSHOT|RECORDING") String frameSource,@Valid SceneCounts counts,
+      @Size(max=2000) String details) {}
+  /** 구간 전체 인원 집계(segment-v3). workersNoHelmet은 조끼 착용자 중 안전모 미착용 수다. */
+  public record SceneCounts(@NotNull @Min(0) @Max(500) Integer people,@NotNull @Min(0) @Max(500) Integer helmetPresent,
+      @NotNull @Min(0) @Max(500) Integer helmetAbsent,@NotNull @Min(0) @Max(500) Integer helmetUnknown,
+      @NotNull @Min(0) @Max(500) Integer vestPresent,@NotNull @Min(0) @Max(500) Integer vestAbsent,
+      @NotNull @Min(0) @Max(500) Integer vestUnknown,@NotNull @Min(0) @Max(500) Integer workersNoHelmet,
+      @Min(0) @Max(500) Integer fallen) {}
   public record Failure(@NotBlank String leaseToken,@NotBlank @Size(max=500) String error) {}
 
   @Transactional
@@ -54,15 +71,21 @@ public class ObservationService {
     db.expire();
     var claimed=db.claim(UUID.randomUUID().toString());
     if(claimed==null) return null;
+    var snapshots=db.snapshots(claimed.batchId()).stream()
+        .map(at->new Snapshot(at,detections.snapshotFile(claimed.batchId(),at).toString())).toList();
     var recording=recordings.covering(claimed.deviceId(),claimed.cameraId(),claimed.startedAt());
-    double offset=Duration.between(recording.startedAt(),claimed.startedAt()).toNanos()/1e9;
-    double length=Duration.between(claimed.startedAt(),claimed.endedAt()).toNanos()/1e9;
-    // 녹화가 구간 중간에 끝나면 녹화 안쪽까지만 분석한다.
-    length=Math.min(length,recording.durationSeconds()-offset);
-    Path file=recordingFiles.file(recording.id());
+    String recordingId=null,path=null;
+    Double offset=null,length=null;
+    if(recording!=null) {
+      offset=Duration.between(recording.startedAt(),claimed.startedAt()).toNanos()/1e9;
+      // 녹화가 구간 중간에 끝나면 녹화 안쪽까지만 분석한다.
+      length=Math.min(Duration.between(claimed.startedAt(),claimed.endedAt()).toNanos()/1e9,recording.durationSeconds()-offset);
+      recordingId=recording.id();
+      path=recordingFiles.file(recording.id()).toString();
+    }
     return new Job(claimed.batchId(),claimed.leaseToken(),claimed.deviceId(),claimed.cameraId(),claimed.startedAt(),claimed.endedAt(),
-        recording.id(),file.toString(),offset,length,json.readValue(db.payload(claimed.batchId()),Object.class),db.yoloTracks(claimed.batchId()),
-        claimed.attempts());
+        recordingId,path,offset,length,json.readValue(db.payload(claimed.batchId()),Object.class),db.yoloTracks(claimed.batchId()),
+        claimed.attempts(),snapshots.isEmpty()?"RECORDING":"SNAPSHOT",snapshots);
   }
 
   public void heartbeat(UUID id,Lease lease) {
@@ -88,9 +111,16 @@ public class ObservationService {
     }
     boolean completed="COMPLETED".equals(c.status());
     if(completed && (c.summary()==null || c.summary().isBlank())) throw error(HttpStatus.BAD_REQUEST,"INVALID_SUMMARY");
-    if(!completed && !c.persons().isEmpty()) throw error(HttpStatus.BAD_REQUEST,"INVALID_SKIP");
+    if(!completed && (!c.persons().isEmpty() || c.counts()!=null)) throw error(HttpStatus.BAD_REQUEST,"INVALID_SKIP");
+    var k=c.counts();
+    if(k!=null && (k.helmetPresent()+k.helmetAbsent()+k.helmetUnknown()>k.people() || k.vestPresent()+k.vestAbsent()+k.vestUnknown()>k.people()
+        || k.workersNoHelmet()>Math.min(k.vestPresent(),k.helmetAbsent()))) throw error(HttpStatus.BAD_REQUEST,"INVALID_COUNTS");
+    if(k!=null && k.fallen()!=null && k.fallen()>k.people()) throw error(HttpStatus.BAD_REQUEST,"INVALID_COUNTS");
+    var counts=k==null?Counts.NONE:new Counts(k.people(),k.helmetPresent(),k.helmetAbsent(),k.helmetUnknown(),k.vestPresent(),
+        k.vestAbsent(),k.vestUnknown(),k.workersNoHelmet(),k.fallen());
     if(db.complete(batch,c.leaseToken(),c.status(),completed?c.summary().strip():null,completed?null:c.skipReason(),c.model(),
-        c.promptVersion(),c.frameCount(),c.elapsedMs(),image!=null)!=1) throw error(HttpStatus.CONFLICT,"LEASE_LOST");
+        c.promptVersion(),c.frameCount(),c.elapsedMs(),image!=null,c.frameSource(),counts,
+        completed && c.details()!=null && !c.details().isBlank()?c.details().strip():null)!=1) throw error(HttpStatus.CONFLICT,"LEASE_LOST");
     if(image!=null) {
       java.nio.file.Files.createDirectories(thumbnails);
       Path temp=java.nio.file.Files.createTempFile(thumbnails,"thumb-",".part");
@@ -141,18 +171,19 @@ public class ObservationService {
   /** 검색 조건. null은 조건 없음. from/to가 비면 그쪽 기간 제한이 없다(둘 다 비면 전체 기간). */
   public record Filter(@Pattern(regexp=ID) String deviceId,@Pattern(regexp=ID) String cameraId,OffsetDateTime from,OffsetDateTime to,
       @Pattern(regexp="present|absent|unknown") String helmet,@Pattern(regexp="present|absent|unknown") String vest,
-      @Size(max=100) String text) {}
+      @Size(max=100) String text,Boolean fallen,@Pattern(regexp="pending") String review) {}
   public record Person(String trackId,String helmet,String vest,String evidence,String yoloHelmet,String yoloVest) {}
   public record SegmentView(String batchId,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,
       String summary,List<Person> persons,List<String> matched,String recordingId,Double offsetSeconds,String playbackPath,
-      String thumbnailPath) {}
+      String thumbnailPath,String frameSource,SceneCounts counts,String details,String clipPath) {}
 
   public Filter normalize(Filter f) {
     OffsetDateTime to=f.to()==null?null:DetectionService.utc(f.to());
     OffsetDateTime from=f.from()==null?null:DetectionService.utc(f.from());
     if(from!=null && to!=null && !to.isAfter(from)) throw error(HttpStatus.BAD_REQUEST,"INVALID_RANGE");
     String text=f.text()==null || f.text().isBlank()?null:f.text().strip();
-    return new Filter(blank(f.deviceId()),blank(f.cameraId()),from,to,blank(f.helmet()),blank(f.vest()),text);
+    return new Filter(blank(f.deviceId()),blank(f.cameraId()),from,to,blank(f.helmet()),blank(f.vest()),text,
+        Boolean.TRUE.equals(f.fallen())?Boolean.TRUE:null,blank(f.review()));
   }
   static String blank(String v) { return v==null || v.isBlank()?null:v; }
 
@@ -160,7 +191,8 @@ public class ObservationService {
     Filter f=normalize(raw);
     String pattern=f.text()==null?null:"%"+f.text().replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";
     List<SegmentView> out=new ArrayList<>();
-    for(var s:db.search(f.deviceId(),f.cameraId(),f.from(),f.to(),f.helmet(),f.vest(),pattern)) {
+    Map<String,List<MediaPlayback.Range>> recorded=new HashMap<>();
+    for(var s:db.search(f.deviceId(),f.cameraId(),f.from(),f.to(),f.helmet(),f.vest(),Boolean.TRUE.equals(f.fallen()),pattern)) {
       List<Person> persons=json.readValue(s.persons(),new TypeReference<List<Person>>(){});
       // 조건에 맞은 사람을 결과 화면에서 강조한다. 문구 조건만 있으면 강조하지 않는다.
       List<String> matched=f.helmet()==null && f.vest()==null ? List.of() : persons.stream()
@@ -168,15 +200,37 @@ public class ObservationService {
           .map(Person::trackId).toList();
       out.add(new SegmentView(s.batchId(),s.deviceId(),s.cameraId(),s.startedAt(),s.endedAt(),s.summary(),persons,matched,
           s.recordingId(),s.offsetSeconds(),s.recordingId()==null?null:"/api/recordings/"+s.recordingId()+"/video",
-          s.hasThumbnail()?"/api/observations/"+s.batchId()+"/thumbnail":null));
+          s.hasThumbnail()?"/api/observations/"+s.batchId()+"/thumbnail":null,s.frameSource(),
+          s.people()==null?null:new SceneCounts(s.people(),s.helmetPresent(),s.helmetAbsent(),s.helmetUnknown(),s.vestPresent(),
+              s.vestAbsent(),s.vestUnknown(),s.workersNoHelmet(),s.fallen()),s.details(),clipPath(s,recorded)));
     }
     return out;
+  }
+
+  static final double CLIP_BEFORE=3,CLIP_AFTER=5;
+
+  /**
+   * 장치 송출 구간(파일 등록 녹화가 아닌 구간)은 MediaMTX 클립으로 재생한다: 구간 시작 CLIP_BEFORE초 전부터
+   * 구간 끝 CLIP_AFTER초 뒤까지(최대 2분).
+   * 침입 순간 배치는 구간 시작이 곧 침입 시각이다. 파일로 등록한 데모 녹화는 기존 playbackPath를 쓴다.
+   */
+  String clipPath(Segment s,Map<String,List<MediaPlayback.Range>> recorded) {
+    if("FILE".equals(s.recordingSource())) return null;
+    // MediaMTX에 그 시각 녹화가 없으면(송출이 꺼져 있던 시각, 보존 기한 지남) 재생 경로를 주지 않는다.
+    var ranges=recorded.computeIfAbsent(s.deviceId()+"/"+s.cameraId(),k->playback.list(s.deviceId(),s.cameraId()));
+    if(!playback.covers(ranges,s.startedAt())) return null;
+    double length=Math.max(0,java.time.Duration.between(s.startedAt(),s.endedAt()).toMillis()/1000.0);
+    double after=Math.min(length+CLIP_AFTER,ClipController.MAX_SECONDS-CLIP_BEFORE);
+    return "/api/clips?deviceId="+s.deviceId()+"&cameraId="+s.cameraId()+"&at="
+        +java.net.URLEncoder.encode(DetectionService.utc(s.startedAt()).toString(),java.nio.charset.StandardCharsets.UTF_8)
+        +"&before="+(int)CLIP_BEFORE+"&after="+String.format(java.util.Locale.ROOT,"%.1f",after);
   }
 
   // ---- 질문 대화 ----
   public record Ask(UUID conversationId,@NotBlank @Size(max=500) String message) {}
   public record QuestionView(String id,String conversationId,int seq,String message,String status,Filter filter,String reply,
-      String error,Integer elapsedMs,OffsetDateTime createdAt,OffsetDateTime finishedAt,Object trace,List<SegmentView> results) {}
+      String error,Integer elapsedMs,OffsetDateTime createdAt,OffsetDateTime finishedAt,Object trace,List<SegmentView> results,
+      List<FpCheckService.ItemView> reviews) {}
   public record QuestionJob(String id,String leaseToken,String message,OffsetDateTime now,List<Map<String,Object>> history,List<Camera> cameras) {}
   public record Answer(@NotBlank String leaseToken,@NotNull @Valid Filter filter,@NotBlank @Size(max=500) String reply,Integer elapsedMs,
       Map<String,Object> trace) {}
@@ -212,7 +266,11 @@ public class ObservationService {
   QuestionView view(Question q,boolean results) {
     Filter filter=q.filter()==null?null:json.readValue(q.filter(),Filter.class);
     return new QuestionView(q.id(),q.conversationId(),q.seq(),q.message(),q.status(),filter,q.reply(),q.error(),q.elapsedMs(),
-        q.createdAt(),q.finishedAt(),q.trace()==null?null:json.readValue(q.trace(),Object.class),results && filter!=null && "COMPLETED".equals(q.status())?search(filter):null);
+        q.createdAt(),q.finishedAt(),q.trace()==null?null:json.readValue(q.trace(),Object.class),
+        // review 조건(관리자 확인이 필요한 사진)은 구간 대신 오탐 확인 검토 대기 목록을 돌려준다.
+        results && filter!=null && "COMPLETED".equals(q.status())?(filter.review()!=null?List.of():search(filter)):null,
+        results && filter!=null && "COMPLETED".equals(q.status()) && filter.review()!=null
+            ?fpChecks.list("PENDING",filter.deviceId(),filter.cameraId(),filter.from(),filter.to(),100):null);
   }
 
   @Transactional

@@ -10,10 +10,21 @@ public interface ObservationMapper {
   record Claimed(String batchId,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,String leaseToken,int attempts) {}
   record YoloTrack(String trackId,int frames,String helmet,String vest) {}
 
+  /**
+   * 원본 프레임을 기다리는 기한은 구간 끝과 수신 시각 중 늦은 쪽부터 센다. 장치 전송 대기열이 밀려 늦게 도착한 배치도
+   * 뒤따르는 원본 프레임을 기다리게 하기 위해서다.
+   */
   @Insert("""
-      INSERT INTO observations(batch_id,device_id,camera_id,started_at,ended_at)
-      VALUES(#{batchId}::uuid,#{deviceId},#{cameraId},#{startedAt},#{endedAt}) ON CONFLICT (batch_id) DO NOTHING""")
-  void enqueue(String batchId,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt);
+      INSERT INTO observations(batch_id,device_id,camera_id,started_at,ended_at,snapshot_expected,snapshot_due)
+      VALUES(#{batchId}::uuid,#{deviceId},#{cameraId},#{startedAt},#{endedAt},#{snapshots},
+        CASE WHEN #{snapshots}>0 THEN greatest(#{endedAt},now())+make_interval(secs=>#{waitSeconds}) END)
+      ON CONFLICT (batch_id) DO NOTHING""")
+  void enqueue(String batchId,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,int snapshots,int waitSeconds);
+  @Insert("""
+      INSERT INTO observations(batch_id,device_id,camera_id,started_at,ended_at,status,skip_reason,finished_at)
+      VALUES(#{batchId}::uuid,#{deviceId},#{cameraId},#{startedAt},#{endedAt},'SKIPPED',#{reason},now())
+      ON CONFLICT (batch_id) DO NOTHING""")
+  void enqueueSkipped(String batchId,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,String reason);
 
   /** 임대가 끝난 작업은 3회까지 다시 대기열로 보내고 그 뒤에는 실패로 둔다. */
   @Update("""
@@ -23,17 +34,25 @@ public interface ObservationMapper {
       WHERE status='RUNNING' AND lease_until<now()""")
   int expire();
 
-  /** 구간 시작 시각을 포함한 원본 녹화가 있어야 가져간다. 없으면 녹화가 등록될 때까지 기다린다. */
+  /**
+   * 가져갈 수 있는 구간: 기다리던 원본 프레임이 모두 왔거나, 기다림이 끝났고(또는 기다리지 않고) 원본 프레임이나
+   * 구간 시작을 포함한 녹화가 있을 때. 둘 다 없으면 녹화가 등록될 때까지 기다린다.
+   */
   @Select(value="""
       UPDATE observations SET status='RUNNING',attempts=attempts+1,lease_token=#{token}::uuid,lease_until=now()+interval '120 seconds'
-      WHERE batch_id=(SELECT o.batch_id FROM observations o WHERE o.status='QUEUED' AND EXISTS(
-          SELECT 1 FROM recordings r WHERE r.device_id=o.device_id AND r.camera_id=o.camera_id
-            AND r.started_at<=o.started_at AND r.ended_at>o.started_at)
+      WHERE batch_id=(SELECT o.batch_id FROM observations o WHERE o.status='QUEUED' AND (
+          (o.snapshot_expected>0 AND (SELECT count(*) FROM detection_snapshots s WHERE s.batch_id=o.batch_id)>=o.snapshot_expected)
+          OR ((o.snapshot_due IS NULL OR o.snapshot_due<=now()) AND (
+            EXISTS(SELECT 1 FROM detection_snapshots s WHERE s.batch_id=o.batch_id)
+            OR EXISTS(SELECT 1 FROM recordings r WHERE r.device_id=o.device_id AND r.camera_id=o.camera_id
+              AND r.started_at<=o.started_at AND r.ended_at>o.started_at))))
         ORDER BY o.created_at,o.batch_id FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING batch_id::text,device_id,camera_id,started_at,ended_at,lease_token::text,attempts""",affectData=true)
   Claimed claim(String token);
 
   @Select("SELECT payload::text FROM detection_batches WHERE batch_id=#{id}::uuid") String payload(String id);
+  @Select("SELECT captured_at FROM detection_snapshots WHERE batch_id=#{id}::uuid ORDER BY captured_at")
+  List<OffsetDateTime> snapshots(String id);
   @Select("SELECT track_id,frames,helmet,vest FROM detection_tracks WHERE batch_id=#{id}::uuid ORDER BY track_id")
   List<YoloTrack> yoloTracks(String id);
 
@@ -45,10 +64,17 @@ public interface ObservationMapper {
   @Update("""
       UPDATE observations SET status=#{status},summary=#{summary},skip_reason=#{skipReason},error=NULL,model=#{model},
         prompt_version=#{promptVersion},frame_count=#{frameCount},elapsed_ms=#{elapsedMs},has_thumbnail=#{thumbnail},
-        lease_token=NULL,lease_until=NULL,finished_at=now()
+        frame_source=#{frameSource},people=#{c.people},helmet_present=#{c.helmetPresent},helmet_absent=#{c.helmetAbsent},
+        helmet_unknown=#{c.helmetUnknown},vest_present=#{c.vestPresent},vest_absent=#{c.vestAbsent},vest_unknown=#{c.vestUnknown},
+        workers_no_helmet=#{c.workersNoHelmet},fallen=#{c.fallen},details=#{details},lease_token=NULL,lease_until=NULL,finished_at=now()
       WHERE batch_id=#{id}::uuid AND status='RUNNING' AND lease_token=#{token}::uuid""")
   int complete(String id,String token,String status,String summary,String skipReason,String model,String promptVersion,
-      Integer frameCount,Integer elapsedMs,boolean thumbnail);
+      Integer frameCount,Integer elapsedMs,boolean thumbnail,String frameSource,Counts c,String details);
+  /** 장면 집계(V30). 모든 값이 null이면 집계 없음(이전 구간·생략 구간). */
+  record Counts(Integer people,Integer helmetPresent,Integer helmetAbsent,Integer helmetUnknown,Integer vestPresent,
+      Integer vestAbsent,Integer vestUnknown,Integer workersNoHelmet,Integer fallen) {
+    static final Counts NONE=new Counts(null,null,null,null,null,null,null,null,null);
+  }
   @Select("SELECT has_thumbnail FROM observations WHERE batch_id=#{id}::uuid") Boolean hasThumbnail(String id);
 
   @Update("""
@@ -78,7 +104,9 @@ public interface ObservationMapper {
 
   // ---- 검색 ----
   record Segment(String batchId,String deviceId,String cameraId,OffsetDateTime startedAt,OffsetDateTime endedAt,String summary,
-      String persons,String recordingId,Double offsetSeconds,boolean hasThumbnail) {}
+      String persons,String recordingId,Double offsetSeconds,boolean hasThumbnail,String frameSource,Integer people,
+      Integer helmetPresent,Integer helmetAbsent,Integer helmetUnknown,Integer vestPresent,Integer vestAbsent,Integer vestUnknown,
+      Integer workersNoHelmet,Integer fallen,String details,String recordingSource) {}
 
   @Select("""
       <script>
@@ -86,9 +114,10 @@ public interface ObservationMapper {
         (SELECT coalesce(json_agg(json_build_object('trackId',p.track_id,'helmet',p.helmet,'vest',p.vest,'evidence',p.evidence,
             'yoloHelmet',p.yolo_helmet,'yoloVest',p.yolo_vest) ORDER BY p.track_id),'[]'::json)
          FROM observation_persons p WHERE p.batch_id=o.batch_id)::text AS persons,
-        r.id::text AS recording_id,extract(epoch FROM o.started_at-r.started_at)::float8 AS offset_seconds,o.has_thumbnail
+        r.id::text AS recording_id,extract(epoch FROM o.started_at-r.started_at)::float8 AS offset_seconds,o.has_thumbnail,o.frame_source,
+        o.people,o.helmet_present,o.helmet_absent,o.helmet_unknown,o.vest_present,o.vest_absent,o.vest_unknown,o.workers_no_helmet,o.fallen,o.details,r.source AS recording_source
       FROM observations o
-      LEFT JOIN LATERAL (SELECT id,started_at FROM recordings r WHERE r.device_id=o.device_id AND r.camera_id=o.camera_id
+      LEFT JOIN LATERAL (SELECT id,started_at,source FROM recordings r WHERE r.device_id=o.device_id AND r.camera_id=o.camera_id
           AND r.started_at &lt;= o.started_at AND r.ended_at &gt; o.started_at ORDER BY r.started_at DESC,r.id LIMIT 1) r ON true
       WHERE o.status='COMPLETED'
       <if test="to != null"> AND o.started_at &lt; #{to}</if>
@@ -96,16 +125,25 @@ public interface ObservationMapper {
       <if test="deviceId != null"> AND o.device_id=#{deviceId}</if>
       <if test="cameraId != null"> AND o.camera_id=#{cameraId}</if>
       <if test="helmet != null or vest != null">
-        AND EXISTS(SELECT 1 FROM observation_persons p WHERE p.batch_id=o.batch_id
-          <if test="helmet != null"> AND p.helmet=#{helmet}</if><if test="vest != null"> AND p.vest=#{vest}</if>)
+        AND ((o.people IS NULL AND EXISTS(SELECT 1 FROM observation_persons p WHERE p.batch_id=o.batch_id
+          <if test="helmet != null"> AND p.helmet=#{helmet}</if><if test="vest != null"> AND p.vest=#{vest}</if>))
+        OR (o.people IS NOT NULL
+          <if test="helmet == 'present'"> AND o.helmet_present &gt; 0</if>
+          <if test="helmet == 'absent' and vest != 'present'"> AND o.helmet_absent &gt; 0</if>
+          <if test="helmet == 'absent' and vest == 'present'"> AND o.workers_no_helmet &gt; 0</if>
+          <if test="helmet == 'unknown'"> AND o.helmet_unknown &gt; 0</if>
+          <if test="vest == 'present' and helmet != 'absent'"> AND o.vest_present &gt; 0</if>
+          <if test="vest == 'absent'"> AND o.vest_absent &gt; 0</if>
+          <if test="vest == 'unknown'"> AND o.vest_unknown &gt; 0</if>))
       </if>
+      <if test="fallen"> AND o.fallen &gt; 0</if>
       <if test="pattern != null">
-        AND (o.summary ILIKE #{pattern} ESCAPE '\\' OR EXISTS(SELECT 1 FROM observation_persons p
+        AND (o.summary ILIKE #{pattern} ESCAPE '\\' OR o.details ILIKE #{pattern} ESCAPE '\\' OR EXISTS(SELECT 1 FROM observation_persons p
           WHERE p.batch_id=o.batch_id AND p.evidence ILIKE #{pattern} ESCAPE '\\'))
       </if>
       ORDER BY o.started_at DESC,o.batch_id DESC LIMIT 50
       </script>""")
-  List<Segment> search(String deviceId,String cameraId,OffsetDateTime from,OffsetDateTime to,String helmet,String vest,String pattern);
+  List<Segment> search(String deviceId,String cameraId,OffsetDateTime from,OffsetDateTime to,String helmet,String vest,boolean fallen,String pattern);
 
   record Camera(String deviceId,String cameraId,OffsetDateTime firstAt,OffsetDateTime lastAt,int segments) {}
   @Select("""

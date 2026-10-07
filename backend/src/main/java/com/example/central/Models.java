@@ -82,6 +82,11 @@ public final class Models {
 
   public record ViewSession(String whepUrl, String token, OffsetDateTime expiresAt) {}
 
+  /** heartbeat 응답 streamRequest와 관리자 임대 API 응답. 시각은 UTC다. */
+  public record StreamRequest(String cameraId, UUID requestId, OffsetDateTime expiresAt) {}
+
+  public record StreamLeaseRequest(@NotNull UUID viewerId) {}
+
   public record MediaAuthRequest(
       String user,
       String password,

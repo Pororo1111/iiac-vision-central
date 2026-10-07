@@ -19,7 +19,7 @@ for line in (ROOT / '.env').read_text().splitlines():
         key, value = line.split('=', 1)
         ENV[key] = value
 TOKEN = os.environ.get('AI_WORKER_TOKEN', ENV.get('AI_WORKER_TOKEN', ''))
-BASE = 'http://127.0.0.1:8201/internal/ai'
+BASE = os.environ.get('CENTRAL_INTERNAL_URL', 'http://127.0.0.1:8201') + '/internal/ai'
 OLLAMA = os.environ.get('OLLAMA_URL', 'http://127.0.0.1:11434')
 
 
@@ -142,6 +142,14 @@ def main():
                     if args.once:
                         return
                     continue
+                # 이름이 정해져야 파이프라인이 학습 실행을 만들므로 다른 대기 작업보다 먼저 처리한다.
+                from naming import process as process_naming
+                naming = api('/pipelines/naming/claim', {})
+                if naming:
+                    process_naming(naming, api)
+                    if args.once:
+                        return
+                    continue
                 from importer import process as process_import
                 media_import = api('/imports/claim', {})
                 if media_import:
@@ -153,13 +161,6 @@ def main():
                 external = api('/external/claim', {})
                 if external:
                     process_external(external, api, ENV)
-                    if args.once:
-                        return
-                    continue
-                from naming import process as process_naming
-                naming = api('/pipelines/naming/claim', {})
-                if naming:
-                    process_naming(naming, api)
                     if args.once:
                         return
                     continue

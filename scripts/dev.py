@@ -31,8 +31,10 @@ def environment():
         PGPASSWORD=env['POSTGRES_PASSWORD'], PGDATABASE=env.get('POSTGRES_DB', 'central'),
         COOKIE_SECURE='false', MEDIA_ROOT=str(DATA / 'media'), TRAINING_RUNS_ROOT=str(ROOT / '.artifacts/training-runs'),
         BASE_MODEL_PATH=str(ROOT / '.artifacts/ai-assets/models/ppe4-rf27-local-m-20260914.pt'),
+        REVIEW_DATASET_ROOT=str(ROOT / '.artifacts/ai-assets/datasets/admin-fp'),
         MEDIA_PUBLIC_URL=env.get('MEDIA_PUBLIC_URL') or 'http://127.0.0.1:8889',
         # 사설망 주소는 .env에서 받아 media/mediamtx.yml의 loopback 기본값을 덮어쓴다.
+        MTX_PATHDEFAULTS_RECORDPATH=str(DATA / 'stream-recordings') + '/%path/%Y-%m-%d_%H-%M-%S-%f',
         MTX_RTMPADDRESS=media_host + ':1935', MTX_WEBRTCLOCALUDPADDRESS=media_host + ':8189',
         MTX_WEBRTCLOCALTCPADDRESS=media_host + ':8189', MTX_WEBRTCADDITIONALHOSTS=media_host,
         MTX_WEBRTCALLOWORIGINS=','.join(origins),
@@ -103,6 +105,8 @@ def start(env):
         launch('worker', [python, '-u', str(ROOT / 'ai-worker/worker.py')], ROOT)
         # 영상 구간 분석·질문 해석은 학습 작업에 막히지 않게 별도 프로세스로 둔다.
         launch('observer', [python, '-u', str(ROOT / 'ai-worker/observer.py')], ROOT)
+        # 장치 송출 녹화(MediaMTX 분할)를 원본 녹화·탐지 배치로 등록해 영상 검색에 넣는다.
+        launch('indexer', [python, '-u', str(ROOT / 'ai-worker/stream_indexer.py')], ROOT)
     print('로컬 개발 서버: http://localhost:8200 / AI 학습: http://localhost:8200/ai-training')
 
 

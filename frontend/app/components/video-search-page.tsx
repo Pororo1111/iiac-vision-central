@@ -3,6 +3,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, csrfJson } from "../../lib/api";
 import SideNav from "./side-nav";
+import { ReviewCards, ReviewDialog, type ReviewItem } from "./fp-review";
 
 type State = "present" | "absent" | "unknown";
 type Filter = {
@@ -13,6 +14,9 @@ type Filter = {
   helmet: State | null;
   vest: State | null;
   text: string | null;
+  fallen?: boolean | null;
+  /** pending이면 관리자 확인이 필요한 사진(오탐 의심) 목록을 찾는다. */
+  review?: "pending" | null;
 };
 type Person = { trackId: string; helmet: State; vest: State; evidence: string; yoloHelmet: string | null; yoloVest: string | null };
 type Segment = {
@@ -28,7 +32,32 @@ type Segment = {
   offsetSeconds: number | null;
   playbackPath: string | null;
   thumbnailPath: string | null;
+  frameSource: "SNAPSHOT" | "RECORDING" | null;
+  counts: SceneCounts | null;
+  details: string | null;
+  clipPath: string | null;
 };
+type SceneCounts = {
+  people: number;
+  helmetPresent: number;
+  helmetAbsent: number;
+  helmetUnknown: number;
+  vestPresent: number;
+  vestAbsent: number;
+  vestUnknown: number;
+  workersNoHelmet: number;
+  fallen: number | null;
+};
+
+/** 장면 집계 한 줄. 0인 미착용 항목은 생략한다. */
+function countLine(c: SceneCounts) {
+  const parts = [`사람 ${c.people}`];
+  if (c.fallen) parts.push(`⚠ 쓰러짐 ${c.fallen}`);
+  parts.push(`조끼 착용 ${c.vestPresent}`);
+  if (c.helmetAbsent) parts.push(`안전모 미착용 ${c.helmetAbsent}${c.workersNoHelmet ? `(작업자 ${c.workersNoHelmet})` : ""}`);
+  if (c.vestAbsent) parts.push(`조끼 미착용 ${c.vestAbsent}`);
+  return parts.join(" · ");
+}
 type Trace = {
   model: string;
   promptVersion: string;
@@ -53,11 +82,13 @@ type Question = {
   createdAt: string;
   trace: Trace | null;
   results: Segment[] | null;
+  reviews?: ReviewItem[] | null;
 };
 type Stage = "idle" | "queued" | "interpret" | "search" | "done" | "failed";
 type ConversationSummary = { id: string; title: string; questions: number; createdAt: string; updatedAt: string };
 
-const EXAMPLES = ["오늘 안전모 안 쓴 사람 나온 장면 찾아줘", "그중에 조끼는 입은 사람만", "모니터 앞에 앉아 있는 장면 있어?"];
+// 현재 분석 항목(쓰러짐·조끼·안전모 집계, 장면 발견 사항 문구, 기간)으로 실제 검색되는 질문.
+const EXAMPLES = ["관리자 확인이 필요한 사진 있어?", "오늘 감지된 장면 보여줘", "쓰러진 사람 있었어?", "조끼 안 입은 사람 나온 장면 찾아줘", "안전 콘 근처에서 작업하는 장면"];
 const helmetNames: Record<State, string> = { present: "안전모 착용", absent: "안전모 미착용", unknown: "안전모 불명" };
 const vestNames: Record<State, string> = { present: "조끼 착용", absent: "조끼 미착용", unknown: "조끼 불명" };
 
@@ -81,6 +112,8 @@ function conditions(f: Filter) {
   if (f.cameraId) chips.push(`카메라 ${f.cameraId}`);
   if (f.helmet) chips.push(helmetNames[f.helmet]);
   if (f.vest) chips.push(vestNames[f.vest]);
+  if (f.fallen) chips.push("쓰러진 사람");
+  if (f.review) chips.push("관리자 확인 필요(오탐 의심)");
   if (f.text) chips.push(`“${f.text}” 포함`);
   return chips;
 }
@@ -102,7 +135,7 @@ function Flow({ stage, playing }: { stage: Stage; playing: boolean }) {
     { id: "agent", x: 170, y: 120, title: "질문 해석", sub: "Gemma 4 12B", note: "조건 JSON", active: on("interpret"), done: on("search", "done") },
     { id: "segments", x: 330, y: 20, title: "구간 판정", sub: "YOLO 추적 + Gemma 4", note: "10초 구간", active: on("search"), done: on("done") },
     { id: "search", x: 330, y: 120, title: "조건 검색", sub: "PostgreSQL", note: "보호구·기간·문구", active: on("search"), done: on("done") },
-    { id: "video", x: 330, y: 220, title: "원본 녹화", sub: "MP4 구간 재생", note: "Range 요청", active: playing, done: false },
+    { id: "video", x: 330, y: 220, title: "원본 녹화", sub: "녹화 클립 재생", note: "MediaMTX 재생", active: playing, done: false },
     { id: "output", x: 490, y: 120, title: "결과", sub: "구간·재생 위치", active: on("done") || playing, done: false },
   ];
   const edges: [string, string, boolean][] = [
@@ -139,11 +172,16 @@ export default function VideoSearchPage() {
   const [manual, setManual] = useState<{ filter: Filter; results: Segment[] } | null>(null);
   const [search, setSearch] = useState({ text: "", helmet: "", vest: "" });
   const [playing, setPlaying] = useState<{ segment: Segment; key: number } | null>(null);
+  const [playError, setPlayError] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
   const [now, setNow] = useState(() => Date.now());
   // 지난 대화 목록. null이면 닫힘.
   const [history, setHistory] = useState<ConversationSummary[] | null>(null);
+  // 확인 중인 오탐 의심 사진(fp_checks id)
+  const [reviewing, setReviewing] = useState<string | null>(null);
   const video = useRef<HTMLVideoElement>(null);
+  const player = useRef<HTMLDivElement>(null);
+  const stopped = useRef(false);
   const input = useRef<HTMLInputElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const conversationId = questions[0]?.conversationId ?? null;
@@ -197,9 +235,9 @@ export default function VideoSearchPage() {
   }, [questions.length, last?.status]);
 
   const shown = useMemo(() => {
-    if (manual) return { title: "직접 검색", filter: manual.filter, results: manual.results };
+    if (manual) return { title: "직접 검색", filter: manual.filter, results: manual.results, reviews: null as ReviewItem[] | null };
     const q = questions.find((item) => item.id === selected && item.status === "COMPLETED");
-    return q ? { title: `질문 ${q.seq}`, filter: q.filter, results: q.results ?? [] } : null;
+    return q ? { title: `질문 ${q.seq}`, filter: q.filter, results: q.results ?? [], reviews: q.filter?.review ? q.reviews ?? [] : null } : null;
   }, [manual, questions, selected]);
 
   async function ask(text: string) {
@@ -295,10 +333,35 @@ export default function VideoSearchPage() {
     input.current?.focus();
   }
 
+  function play(s: Segment) {
+    if (!s.clipPath && !s.playbackPath) return;
+    setPlaying({ segment: s, key: Date.now() });
+    // 한 열 배치(모바일)에서는 재생 화면이 맨 위에 있으므로 그쪽으로 올린다.
+    if (window.matchMedia("(max-width: 1280px)").matches) {
+      requestAnimationFrame(() => player.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+  }
+
+  // 재생할 구간(초). 클립은 구간 앞뒤만 잘라 온 파일이므로 전체가 구간이고, 파일 녹화는 구간 위치만 재생한다.
+  function windowOf(s: Segment): [number, number] | null {
+    if (s.clipPath || s.offsetSeconds == null) return null;
+    const length = Math.max(0, (Date.parse(s.endedAt) - Date.parse(s.startedAt)) / 1000);
+    return [Math.max(0, s.offsetSeconds - 2), s.offsetSeconds + Math.max(length, 1) + 3];
+  }
+
   function seek() {
-    if (video.current && playing?.segment.offsetSeconds != null) {
-      video.current.currentTime = playing.segment.offsetSeconds;
-      void video.current.play().catch(() => undefined);
+    if (!video.current || !playing) return;
+    stopped.current = false;
+    video.current.currentTime = windowOf(playing.segment)?.[0] ?? 0;
+    void video.current.play().catch(() => undefined);
+  }
+
+  function stopAtEnd() {
+    const end = playing && windowOf(playing.segment)?.[1];
+    // 구간 끝에서 한 번만 멈춘다. 이후 사용자가 다시 재생하면 이어서 본다.
+    if (video.current && end != null && !stopped.current && video.current.currentTime >= end) {
+      stopped.current = true;
+      video.current.pause();
     }
   }
 
@@ -315,16 +378,19 @@ export default function VideoSearchPage() {
       </header>
       <div className="vsx-grid">
         <section className="vsx-left" aria-label="원본 영상과 처리 흐름">
-          <div className="vsx-player">
+          <div className="vsx-player" ref={player}>
             {playing ? (
               <>
-                <video key={playing.key} ref={video} controls muted playsInline src={playing.segment.playbackPath ?? undefined} onLoadedMetadata={seek} />
+                <video key={playing.key} ref={video} controls muted playsInline src={playing.segment.clipPath ?? playing.segment.playbackPath ?? undefined}
+                  onLoadedMetadata={() => { setPlayError(null); seek(); }} onTimeUpdate={stopAtEnd}
+                  onError={() => setPlayError("녹화를 불러오지 못했습니다. 이 시각의 녹화가 없거나(송출이 꺼져 있던 시각·보존 7일 지남) 재생 서버가 응답하지 않습니다.")} />
+                {playError && <p className="vsx-play-error">{playError}</p>}
                 <div className="vsx-player-bar">
                   <strong>
                     {playing.segment.cameraId} · {clock(playing.segment.startedAt)} – {clock(playing.segment.endedAt)}
                   </strong>
-                  <span>녹화 {playing.segment.offsetSeconds?.toFixed(1)}초 위치</span>
-                  <button onClick={seek}>구간 처음으로</button>
+                  <span>{playing.segment.clipPath ? "해당 구간 클립(앞 3초·뒤 5초 포함)" : `녹화 ${playing.segment.offsetSeconds?.toFixed(1)}초 위치 구간만 재생`}</span>
+                  <button onClick={seek}>구간 다시 보기</button>
                 </div>
               </>
             ) : (
@@ -378,7 +444,18 @@ export default function VideoSearchPage() {
               <option value="unknown">불명</option>
             </select>
           </form>
-          {shown ? (
+          {shown?.reviews ? (
+            <>
+              <div className="vsx-results-head">
+                <strong>{shown.title}</strong>
+                <span>확인이 필요한 사진 {shown.reviews.filter((r) => r.item.reviewStatus === "PENDING").length}장</span>
+                <div className="vsx-chips">
+                  {shown.filter && conditions(shown.filter).map((c) => <span key={c}>{c}</span>)}
+                </div>
+              </div>
+              <ReviewCards items={shown.reviews} onOpen={setReviewing} />
+            </>
+          ) : shown ? (
             <>
               <div className="vsx-results-head">
                 <strong>{shown.title}</strong>
@@ -397,9 +474,9 @@ export default function VideoSearchPage() {
                           <span title={s.deviceId}>{s.cameraId}</span>
                           <button onClick={() => addToChat(s)}>대화에 추가</button>
                         </header>
-                        <button className="vsx-thumb" disabled={!s.playbackPath} onClick={() => setPlaying({ segment: s, key: Date.now() })} aria-label={`${clock(s.startedAt)} 구간 재생`}>
+                        <button className="vsx-thumb" disabled={!s.clipPath && !s.playbackPath} onClick={() => play(s)} aria-label={`${clock(s.startedAt)} 구간 재생`}>
                           {s.thumbnailPath ? <img src={s.thumbnailPath} alt="" loading="lazy" /> : <span className="vsx-thumb-empty">대표 이미지 없음</span>}
-                          <span className="vsx-play">▶</span>
+                          {s.clipPath || s.playbackPath ? <span className="vsx-play">▶</span> : <span className="vsx-norec">녹화 없음</span>}
                           <span className="vsx-time">
                             {clock(s.startedAt)} – {clock(s.endedAt)}
                           </span>
@@ -410,6 +487,11 @@ export default function VideoSearchPage() {
                           </p>
                         )}
                         <div className="vsx-tags">
+                          {s.frameSource === "RECORDING" && (
+                            <span className="src" title="장치 원본 프레임이 오지 않아 녹화 화면에서 판정했습니다. 송출 영상이면 장치가 그린 박스·글자가 함께 보였을 수 있습니다.">
+                              녹화 화면 판정
+                            </span>
+                          )}
                           {s.persons.filter((p) => !s.matched.length || s.matched.includes(p.trackId)).slice(0, 4).map((p) => (
                             <span key={p.trackId} className={s.matched.includes(p.trackId) ? "hit" : undefined} title={p.evidence}>
                               {s.matched.includes(p.trackId) ? "✓ " : ""}
@@ -417,7 +499,17 @@ export default function VideoSearchPage() {
                             </span>
                           ))}
                         </div>
+                        {s.counts && (
+                          <p className={`vsx-counts${s.counts.fallen ? " alert" : ""}`} title={`안전모 착용 ${s.counts.helmetPresent} · 미착용 ${s.counts.helmetAbsent} · 판단 불가 ${s.counts.helmetUnknown} / 조끼 착용 ${s.counts.vestPresent} · 미착용 ${s.counts.vestAbsent} · 판단 불가 ${s.counts.vestUnknown}`}>
+                            {countLine(s.counts)}
+                          </p>
+                        )}
                         <p className="vsx-summary">{s.summary}</p>
+                        {s.details && (
+                          <ul className="vsx-details">
+                            {s.details.split("\n").map((line, i) => <li key={i}>{line}</li>)}
+                          </ul>
+                        )}
                       </article>
                     );
                   })}
@@ -464,9 +556,9 @@ export default function VideoSearchPage() {
             {!questions.length && (
               <div className="vsx-hello">
                 <h2>무엇을 찾을까요?</h2>
-                <p>분석된 현장 영상에서 보호구·시간·장면 조건으로 구간을 찾습니다.</p>
+                <p>분석된 현장 영상에서 보호구·쓰러짐·시간·장면 조건으로 구간을 찾습니다.</p>
                 {EXAMPLES.map((example) => (
-                  <button key={example} onClick={() => { setMessage(example); input.current?.focus(); }}>
+                  <button key={example} disabled={!!pending || sending} onClick={() => void ask(example)}>
                     {example}
                   </button>
                 ))}
@@ -513,8 +605,32 @@ export default function VideoSearchPage() {
                         </details>
                       </details>
                       <p className="vsx-reply">{q.reply}</p>
-                      <p className="vsx-found">{q.results?.length ? `${q.results.length}개 구간을 찾았습니다.` : "조건에 맞는 구간이 없습니다."}</p>
-                      {!!q.results?.length && (
+                      {q.filter.review ? (
+                        <>
+                          <p className="vsx-found">{q.reviews?.length ? `확인이 필요한 사진 ${q.reviews.length}장을 찾았습니다. 사진을 눌러 확인하세요.` : "관리자 확인이 필요한 사진이 없습니다."}</p>
+                          {!!q.reviews?.length && (
+                            <div className="vsx-table-wrap">
+                              <table className="vsx-table">
+                                <thead>
+                                  <tr><th>#</th><th>카메라</th><th>촬영</th><th>Gemma 판정</th></tr>
+                                </thead>
+                                <tbody>
+                                  {q.reviews.slice(0, 10).map((r, i) => (
+                                    <tr key={r.item.id} onClick={() => setReviewing(r.item.id)}>
+                                      <td>{i + 1}</td>
+                                      <td>{r.item.cameraId}</td>
+                                      <td>{clock(r.item.capturedAt)}</td>
+                                      <td><span>{r.item.reviewStatus === "PENDING" ? `오탐 ${r.item.falseCount ?? 0} · 애매 ${r.item.unsureCount ?? 0}` : r.item.reviewStatus === "APPROVED" ? "승인됨" : "반려됨"}</span></td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                              {q.reviews.length > 10 && <small>나머지 {q.reviews.length - 10}장은 가운데 결과에서 확인하세요.</small>}
+                            </div>
+                          )}
+                        </>
+                      ) : <p className="vsx-found">{q.results?.length ? `${q.results.length}개 구간을 찾았습니다.` : "조건에 맞는 구간이 없습니다."}</p>}
+                      {!q.filter.review && !!q.results?.length && (
                         <div className="vsx-table-wrap">
                           <table className="vsx-table">
                             <thead>
@@ -522,7 +638,7 @@ export default function VideoSearchPage() {
                             </thead>
                             <tbody>
                               {q.results.slice(0, 10).map((s, i) => (
-                                <tr key={s.batchId} onClick={() => s.playbackPath && setPlaying({ segment: s, key: Date.now() })}>
+                                <tr key={s.batchId} onClick={() => play(s)}>
                                   <td>{i + 1}</td>
                                   <td>{s.cameraId}</td>
                                   <td>{clock(s.startedAt)}</td>
@@ -531,7 +647,7 @@ export default function VideoSearchPage() {
                                     {(s.matched.length ? s.persons.filter((p) => s.matched.includes(p.trackId)) : []).map((p) => (
                                       <span key={p.trackId}>{p.trackId} {helmetNames[p.helmet]}·{vestNames[p.vest]}</span>
                                     ))}
-                                    {!s.matched.length && <span>{s.summary.slice(0, 30)}…</span>}
+                                    {!s.matched.length && <span>{s.counts ? countLine(s.counts) : s.summary.slice(0, 30) + "…"}</span>}
                                   </td>
                                 </tr>
                               ))}
@@ -571,6 +687,10 @@ export default function VideoSearchPage() {
           </form>
         </section>
       </div>
+      {reviewing && (
+        <ReviewDialog id={reviewing} onClose={() => setReviewing(null)}
+          onDone={(item) => setQuestions((list) => list.map((q) => q.reviews ? { ...q, reviews: q.reviews.map((r) => r.item.id === item.id ? { ...r, item: { ...r.item, ...item } } : r) } : q))} />
+      )}
       </main>
     </div>
   );

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, csrfJson, type Device } from "../../lib/api";
 import PipelineDemo from "./pipeline-demo";
 import SideNav from "./side-nav";
@@ -22,7 +22,13 @@ const errors: Record<string, string> = {
   DEVICE_NOT_REGISTERED: "등록되지 않은 장치입니다.", EXTERNAL_NOT_AVAILABLE: "사용할 수 없는 로보플로우 데이터셋이 포함되어 있습니다.",
   ALREADY_IN_BASELINE: "construction-site-safety v27은 기준 데이터셋에 이미 전부 들어 있어 따로 불러올 필요가 없습니다.",
   BASE_MODEL_NOT_FOUND: "선택한 베이스 모델을 찾을 수 없습니다.", ROBOFLOW_SOURCE_REQUIRED: "로보플로우 데이터셋을 하나 이상 선택하세요.",
+  TOO_MANY_EXTERNAL: "로보플로우 데이터셋은 5개까지 고를 수 있습니다(보강 데이터는 제한 없음).",
 };
+/** 직접 확인한 로컬 보강 데이터(local:)는 개수 제한 없이 전부 넣고, 로보플로우는 외부 라벨 보정·상한이 있어 5개까지다. */
+const isLocal = (item: External) => item.url.startsWith("local:");
+const MAX_REMOTE = 5;
+const localNames: Record<string, string> = { "admin-fp": "관리자 승인 오탐 보강" };
+const datasetLabel = (item: External) => isLocal(item) ? `${localNames[item.name ?? ""] ?? item.name ?? item.project}` : `${item.workspace}/${item.project}${item.version ? ` v${item.version}` : ""}`;
 const parse = <T,>(value: string | null, fallback: T): T => { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } };
 
 export default function PipelineWizard() {
@@ -38,6 +44,9 @@ export default function PipelineWizard() {
   const [useRoboflow, setUseRoboflow] = useState(false);
   const [externals, setExternals] = useState<External[]>([]);
   const [chosenExternal, setChosenExternal] = useState<string[]>([]);
+  // 베이스 모델 학습 계보에서 이미 쓴 외부 데이터셋 id(이어받기로 포함됨)
+  const [inBase, setInBase] = useState<string[]>([]);
+  const localsPicked = useRef(false);
   const [roboflowUrl, setRoboflowUrl] = useState("");
   const [baseModels, setBaseModels] = useState<BaseModel[]>([]);
   const [baseModel, setBaseModel] = useState("default");
@@ -51,8 +60,22 @@ export default function PipelineWizard() {
   }, [router]);
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const [deviceList, externalList, models] = await Promise.all([api<Device[]>("/devices", { signal }), api<External[]>("/training/external-datasets", { signal }), api<BaseModel[]>("/training/base-models", { signal })]);
-    if (!signal?.aborted) { setDevices(deviceList); setExternals(externalList); setBaseModels(models); }
+    if (!signal?.aborted) {
+      setDevices(deviceList); setExternals(externalList); setBaseModels(models);
+      // 보강 데이터는 처음 한 번 기본으로 고른다. 이미 학습에 쓴 이미지는 이름이 같아 다시 들어가지 않고 새 이미지만 더해진다.
+      if (!localsPicked.current && externalList.length) {
+        localsPicked.current = true;
+        const locals = externalList.filter(item => isLocal(item) && item.status === "READY").map(item => item.id);
+        setChosenExternal(current => [...new Set([...current, ...locals])]);
+      }
+    }
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ inBase: string[] }>(`/training/external-datasets/lineage?baseModel=${encodeURIComponent(baseModel)}`, { signal: controller.signal })
+      .then(r => setInBase(r.inBase)).catch(() => undefined);
+    return () => controller.abort();
+  }, [baseModel]);
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
@@ -66,6 +89,8 @@ export default function PipelineWizard() {
 
   const sourceReady = kind === "IOT" ? chosenDevices.length > 0 && target >= 1 : kind === "UPLOAD" ? uploaded.sampleIds.length + uploaded.importIds.length > 0 : true;
   const external = kind === "ROBOFLOW" || useRoboflow ? chosenExternal : [];
+  const remoteChosen = externals.filter(item => !isLocal(item) && chosenExternal.includes(item.id)).length;
+  const redundant = externals.filter(item => !isLocal(item) && external.includes(item.id) && inBase.includes(item.id));
   const stepReady = [sourceReady && (kind !== "ROBOFLOW" && !useRoboflow || chosenExternal.length > 0), true, true, epochs >= 1 && epochs <= 100, true][step];
   async function addRoboflow() {
     setError("");
@@ -125,15 +150,21 @@ export default function PipelineWizard() {
             <UploadPanel onUploaded={() => undefined} onResult={result => setUploaded(current => ({ sampleIds: [...new Set([...current.sampleIds, ...result.sampleIds])], importIds: [...current.importIds, ...result.importIds] }))} />
           </div>}
           <div className="wizard-detail">
-            {kind === "ROBOFLOW" ? <h3>로보플로우 데이터셋</h3> : <label className="check-label"><input type="checkbox" checked={useRoboflow} onChange={e => setUseRoboflow(e.target.checked)} />로보플로우 데이터셋도 함께 사용 (선택)</label>}
+            {kind === "ROBOFLOW" ? <h3>외부·보강 데이터셋</h3> : <label className="check-label"><input type="checkbox" checked={useRoboflow} onChange={e => setUseRoboflow(e.target.checked)} />외부·보강 데이터셋도 함께 사용 (선택)</label>}
             {(kind === "ROBOFLOW" || useRoboflow) && <>
             <div className="training-actions"><label className="wizard-url">Roboflow Universe 주소 <input type="url" value={roboflowUrl} maxLength={300} placeholder="https://universe.roboflow.com/워크스페이스/프로젝트/dataset/버전" onChange={e => setRoboflowUrl(e.target.value)} /></label><button disabled={!roboflowUrl.trim()} onClick={() => void addRoboflow()}>불러오기</button></div>
-            {externals.length === 0 ? <p className="muted">불러온 데이터셋이 없습니다.</p> : <div className="external-list">{externals.map(item => {
+            {externals.length === 0 ? <p className="muted">불러온 데이터셋이 없습니다.</p> : <>{([
+              ["보강 데이터 (직접 확인·관리자 승인)", externals.filter(isLocal), "개수 제한 없이 전부 넣습니다. 이전 학습에 쓴 이미지는 다시 들어가지 않고 새로 승인·추가된 이미지만 더해집니다."],
+              ["로보플로우", externals.filter(item => !isLocal(item)), `최대 ${MAX_REMOTE}개. '베이스 모델에 포함' 표시는 베이스 모델이 이미 학습한 데이터셋이라 다시 고르지 않아도 이어받습니다(학습 옵션 단계에서 베이스 모델을 바꾸면 표시도 바뀝니다).`],
+            ] as [string, External[], string][]).filter(([, list]) => list.length).map(([title, list, note]) => <section key={title} className="external-group">
+              <h4>{title} <small className="muted">{list.filter(item => chosenExternal.includes(item.id)).length}/{list.length} 선택</small></h4>
+              <p className="muted">{note}</p>
+              <div className="external-list">{list.map(item => {
               const classes = parse<string[]>(item.classes, []); const mapping = parse<(number | null)[]>(item.mapping, []); const counts = parse<Record<string, number>>(item.counts, {});
               const chosen = chosenExternal.includes(item.id);
               return <article key={item.id} className={`external-item ${chosen ? "chosen" : ""}`}>
-                <label className="check-label"><input type="checkbox" disabled={item.status === "FAILED"} checked={chosen} onChange={e => setChosenExternal(current => e.target.checked ? [...current, item.id] : current.filter(id => id !== item.id))} />
-                  <strong>{item.workspace}/{item.project}{item.version ? ` v${item.version}` : ""}</strong> <span className="collection-badge">{externalStatus[item.status] ?? item.status}</span></label>
+                <label className="check-label"><input type="checkbox" disabled={item.status === "FAILED" || (!chosen && !isLocal(item) && remoteChosen >= MAX_REMOTE)} checked={chosen} onChange={e => setChosenExternal(current => e.target.checked ? [...current, item.id] : current.filter(id => id !== item.id))} />
+                  <strong>{datasetLabel(item)}</strong> <span className="collection-badge">{externalStatus[item.status] ?? item.status}</span>{inBase.includes(item.id) && <span className="collection-badge base">베이스 모델에 포함</span>}</label>
                 {item.status === "READY" && <p className="muted">train {counts.train ?? 0} · val {counts.val ?? 0}장 · 클래스 매핑: {classes.map((c, i) => `${c} → ${mapping[i] == null ? "제외" : CLASSES[mapping[i] as number]}`).join(", ")}</p>}
                 {item.status === "RUNNING" && <div className="external-progress">
                   <span>{phaseName[item.phase ?? "EXPORT"]}{item.progress != null ? ` ${item.progress}%` : ""}</span>
@@ -143,7 +174,8 @@ export default function PipelineWizard() {
                 {item.error && <p className="training-error">{item.error}</p>}
                 {item.status === "FAILED" && <button className="danger" onClick={() => void removeExternal(item.id)}>삭제</button>}
               </article>;
-            })}</div>}
+              })}</div>
+            </section>)}</>}
             <p className="muted">기준 데이터셋(construction-site-safety v27 + 현장 영상 프레임)은 항상 기본으로 포함됩니다. 선택한 데이터셋은 train·val 이미지를 모두 학습에 씁니다. 클래스는 이름으로 자동 연결합니다(예: Hardhat → hard_hat, NO-Hardhat → 제외). 내려받기가 끝나지 않아도 다음으로 넘어갈 수 있으며, 파이프라인이 데이터셋 단계에서 기다립니다.</p>
             </>}
           </div>
@@ -151,11 +183,11 @@ export default function PipelineWizard() {
         {step === 1 && <div className="wizard-auto"><span className="wizard-auto-icon">✓</span><div><h2>자동 라벨링은 알아서 진행됩니다</h2><p className="muted">{kind === "ROBOFLOW" ? "로보플로우 데이터셋은 이미 사람이 라벨링한 박스가 있어 이 단계를 건너뜁니다." : "수집된 이미지마다 Gemma가 장면 설명과 태그(person·safety_vest·traffic_cone·hard_hat)를 만듭니다. 로보플로우 데이터는 사람 라벨을 그대로 씁니다."} 고를 옵션이 없습니다.</p></div></div>}
         {step === 2 && <>
           <div className="wizard-auto"><span className="wizard-auto-icon">✓</span><div><h2>데이터셋 구성은 자동입니다</h2><p className="muted">{kind === "ROBOFLOW" ? "선택한 로보플로우 데이터셋을 4개 클래스로 바꿔 기준 데이터셋과 합칩니다." : "기존 YOLO 모델이 박스 초안을 만들고 Gemma 태그와 일치하는 이미지만 골라 기준 데이터셋과 합칩니다."} 평가용 test 세트는 기준 자료를 그대로 씁니다.</p></div></div>
-          <p className="muted">함께 쓰는 로보플로우 데이터셋: {external.length ? externals.filter(item => external.includes(item.id)).map(item => `${item.workspace}/${item.project}${item.version ? ` v${item.version}` : ""}`).join(", ") : "없음"} · 바꾸려면 데이터 수집 단계로 돌아가세요.</p>
+          <p className="muted">함께 쓰는 외부·보강 데이터셋: {external.length ? externals.filter(item => external.includes(item.id)).map(datasetLabel).join(", ") : "없음"} · 바꾸려면 데이터 수집 단계로 돌아가세요.</p>
         </>}
         {step === 3 && <>
           <h2>학습 옵션</h2>
-          <p className="wizard-name-note">✨ 모델 이름은 따로 적지 않습니다. 학습이 끝나면 Gemma4가 데이터 구성과 결과를 보고 추천한 이름으로 자동 설정됩니다.</p>
+          <p className="wizard-name-note">✨ 모델 이름은 따로 적지 않습니다. 학습을 시작하기 전에 Gemma4가 데이터 구성과 학습 옵션을 보고 추천한 이름으로 먼저 정합니다.</p>
           <h3>베이스 모델</h3>
           <p className="muted">어느 모델에서 학습을 시작할지 고르세요. 평가를 통과해 등록된 후보가 생기면 이 목록에 함께 나옵니다.</p>
           <div className="table-scroll"><table className="model-pick">
@@ -166,6 +198,8 @@ export default function PipelineWizard() {
               <td>{modelKind[item.kind] ?? item.kind}</td><td>{item.size}</td><td>{item.map == null ? "—" : item.map.toFixed(3)}</td><td className="muted">{item.description}</td>
             </tr>)}</tbody>
           </table></div>
+          {redundant.length > 0 && <p className="wizard-note">이 베이스 모델은 고른 로보플로우 데이터셋 {redundant.map(datasetLabel).join(", ")}을(를) 이미 학습했습니다. 이어받기로 포함되므로 다시 고르지 않아도 됩니다.
+            <button onClick={() => setChosenExternal(current => current.filter(id => !redundant.some(item => item.id === id)))}>선택 해제</button></p>}
           <div className="training-actions">
             <label>Epoch <input type="number" min={1} max={100} value={epochs} onChange={e => setEpochs(Number(e.target.value))} /></label>
             <label>선별 신뢰도 {confidence.toFixed(2)} <input type="range" min={0.5} max={0.95} step={0.05} value={confidence} onChange={e => setConfidence(Number(e.target.value))} /></label>
@@ -175,10 +209,10 @@ export default function PipelineWizard() {
         {step === 4 && <>
           <h2>확인</h2>
           <dl className="wizard-summary">
-            <dt>이름</dt><dd>학습 후 Gemma4 자동 추천</dd>
+            <dt>이름</dt><dd>학습 전 Gemma4 자동 추천</dd>
             <dt>데이터 수집</dt><dd>{sourceSummary}</dd>
             <dt>자동 라벨링</dt><dd>{kind === "ROBOFLOW" ? "건너뜀(사람 라벨 사용)" : "Gemma 자동"}</dd>
-            <dt>데이터셋 구성</dt><dd>{kind === "ROBOFLOW" ? "기준 데이터셋" : "YOLO·Gemma 자동 선별 + 기준 데이터셋"}{external.length ? ` + 로보플로우 ${external.length}개(train·val 전체)` : ""}</dd>
+            <dt>데이터셋 구성</dt><dd>{kind === "ROBOFLOW" ? "기준 데이터셋" : "YOLO·Gemma 자동 선별 + 기준 데이터셋"}{external.length ? ` + 외부·보강 데이터셋 ${external.length}개(train·val 전체)` : ""}</dd>
             <dt>학습</dt><dd>{model?.label ?? baseModel} · {epochs} epoch · 신뢰도 {confidence.toFixed(2)}</dd>
             <dt>배포</dt><dd>평가를 통과하면 목록의 배포 버튼으로 IoT 장치에 보냅니다.</dd>
           </dl>

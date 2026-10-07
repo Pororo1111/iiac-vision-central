@@ -199,7 +199,7 @@ export default function PipelinesPage() {
     };
   }
   const nameOf = (view: View) => <>{view.pipeline.sourceKind === "AUTO" && <span className="auto-badge">자동</span>}{view.pipeline.nameStatus === "DONE" ? <strong>{view.pipeline.name}</strong>
-    : <strong className="name-pending">{view.pipeline.nameStatus === "GENERATING" ? "✨ Gemma가 이름 짓는 중…" : "✨ 학습 후 이름 자동 생성"}</strong>}</>;
+    : <strong className="name-pending">{view.pipeline.nameStatus === "GENERATING" ? "✨ Gemma가 이름 짓는 중…" : "✨ Gemma 이름 추천 대기"}</strong>}</>;
   const actions = (view: View, r: ReturnType<typeof rowOf>) => <>
     {view.release && <button className="primary" disabled={!r.canDeploy} onClick={() => void openDeploy(view)}>배포</button>}
     {r.canCancelDeploy && <button onClick={() => void cancelDeploy(view)}>배포 취소</button>}

@@ -9,6 +9,7 @@ import time
 from urllib import error, parse, request
 import json
 import unittest
+import shutil
 import uuid
 
 from integration import BASE, Session
@@ -53,6 +54,7 @@ class VideoSearch(unittest.TestCase):
         cls.batches = cls.sim.batches(cls.sim.analyze(), cls.fixture.id, cls.camera, cls.start, uuid.uuid4())
         for batch in cls.batches:
             assert cls.sim.send(batch, cls.fixture.token)[0] == 200
+            assert all(c == 200 for c in cls.sim.send_snapshots(batch, cls.fixture.token, cls.start))
         began = time.monotonic()
         while time.monotonic() - began < 600 and cls.statuses().get('QUEUED', 0) + cls.statuses().get('RUNNING', 0):
             time.sleep(2)
@@ -74,6 +76,7 @@ class VideoSearch(unittest.TestCase):
             (DATA / 'media/recordings' / (str(uuid.UUID(recording)) + '.mp4')).unlink(missing_ok=True)
         for batch in batches:
             (DATA / 'media/observations' / (str(uuid.UUID(batch)) + '.jpg')).unlink(missing_ok=True)
+            shutil.rmtree(DATA / 'media/detection-snapshots' / str(uuid.UUID(batch)), ignore_errors=True)
 
     def search(self, **params):
         query = parse.urlencode({'deviceId': self.fixture.id, 'from': self.start.isoformat(),
@@ -97,17 +100,29 @@ class VideoSearch(unittest.TestCase):
         self.fail('질문 응답 시간 초과')
 
     def test_1_segments_analyzed_once(self):
-        # 마지막 80–84.45초 로고 구간만 어두워서 생략, 나머지는 분석 완료. 재전송해도 작업이 늘지 않는다.
+        # 마지막 80–84.45초 로고 구간만 생략(사람 없음 또는 어두움), 나머지는 분석 완료. 재전송해도 작업이 늘지 않는다.
         self.assertEqual(self.statuses(), {'COMPLETED': 8, 'SKIPPED': 1})
         for batch in self.batches:
             self.assertTrue(self.sim.send(batch, self.fixture.token)[1]['duplicate'])
+            self.assertTrue(all(c == 200 for c in self.sim.send_snapshots(batch, self.fixture.token, self.start)))
         self.assertEqual(self.statuses(), {'COMPLETED': 8, 'SKIPPED': 1})
-        persons = sql(f"""SELECT count(*),count(*) FILTER (WHERE p.helmet='absent'),
-            count(*) FILTER (WHERE p.track_id NOT IN (SELECT track_id FROM detection_tracks t WHERE t.batch_id=p.batch_id))
-            FROM observation_persons p JOIN observations o USING (batch_id) WHERE o.device_id='{self.fixture.id}'""")
-        total, absent, unknown_refs = map(int, persons.split('|'))
-        print(f'사람 판정 {total}건, 안전모 absent {absent}건')
-        self.assertGreater(total, 0)
+        # 원본 프레임을 보냈으므로 모든 완료 구간은 녹화(오버레이)가 아니라 원본 프레임으로 판정했다.
+        self.assertEqual(sql(f"""SELECT string_agg(DISTINCT coalesce(frame_source,'-'),',') FROM observations
+            WHERE device_id='{self.fixture.id}' AND status='COMPLETED'""").strip(), 'SNAPSHOT')
+        # 장면 집계(segment-v3): 완료 구간마다 집계가 있고, 의심자는 구간당 3명 이하·실제 추적 ID만.
+        counts = sql(f"""SELECT count(*) FILTER (WHERE people IS NULL),sum(people),sum(helmet_absent),sum(workers_no_helmet),
+            round(avg(elapsed_ms)),max(elapsed_ms) FROM observations WHERE device_id='{self.fixture.id}' AND status='COMPLETED'""")
+        missing, people, absent, workers, avg_ms, max_ms = counts.strip().split('|')
+        persons = sql(f"""SELECT count(*),coalesce(max(n),0),
+            count(*) FILTER (WHERE NOT known) FROM (SELECT p.batch_id,count(*) OVER (PARTITION BY p.batch_id) AS n,
+              p.track_id IN (SELECT track_id FROM detection_tracks t WHERE t.batch_id=p.batch_id) AS known
+            FROM observation_persons p JOIN observations o USING (batch_id) WHERE o.device_id='{self.fixture.id}') x""")
+        suspects, most, unknown_refs = map(int, persons.split('|'))
+        print(f'장면 집계: 사람 합 {people}, 안전모 미착용 합 {absent}(작업자 {workers}), 의심자 {suspects}명, '
+              f'구간 처리 평균 {avg_ms}ms·최대 {max_ms}ms')
+        self.assertEqual(int(missing), 0)
+        self.assertGreater(int(people), 0)
+        self.assertLessEqual(most, 3)
         self.assertEqual(unknown_refs, 0)
         # 끝난 작업에 임대 없이 결과를 보내면 거부
         batch = self.batches[0]['batchId']
@@ -118,7 +133,8 @@ class VideoSearch(unittest.TestCase):
         code, results = self.search(helmet='absent')
         self.assertEqual(code, 200, results)
         for segment in results:
-            self.assertTrue(segment['matched'])
+            # 장면 집계로 찾는다. 강조하는 사람(의심자)은 있을 수도 없을 수도 있지만, 있으면 조건에 맞는다.
+            self.assertGreater(segment['counts']['helmetAbsent'], 0)
             self.assertTrue(all(p['helmet'] == 'absent' for p in segment['persons'] if p['trackId'] in segment['matched']))
             # 재생 위치 = 구간 시작 - 녹화 시작(10초 단위)
             expected = (datetime.fromisoformat(segment['startedAt']) - self.start).total_seconds()
@@ -127,6 +143,7 @@ class VideoSearch(unittest.TestCase):
             self.assertAlmostEqual(expected % 10, 0, places=6)
         both = self.search(helmet='absent', vest='present')[1]
         self.assertLessEqual({s['batchId'] for s in both}, {s['batchId'] for s in results})
+        self.assertTrue(all(s['counts']['workersNoHelmet'] > 0 for s in both))
         self.assertEqual(len(self.search()[1]), 8)
         # 대표 이미지: 분석 완료 구간마다 JPEG, 비로그인 401
         everything = self.search()[1]
