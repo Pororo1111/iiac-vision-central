@@ -91,7 +91,8 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 관리자 세션이 필요합니다. 응답에 토큰·비밀번호 해시가 포함되지 않습니다.
 
 - `GET /api/devices`: 배열. 각 항목은 `deviceId`, `name`, `modelName`, `runtimeStatus`, `lastSeenAt`, `registeredAt`, `online`과 감시·진단 필드(위 장치 진단 절).
-- `GET /api/devices/{deviceId}/cameras`: 카메라 ID, 표시명, 송출 상태, 해상도·FPS, 마지막 송출 시각.
+- `GET /api/devices/{deviceId}/cameras`: 카메라 ID, 표시명, 송출 상태, 송출 해상도·FPS, 마지막 송출 시각, 원본 `sourceWidth`·`sourceHeight`·`sourceDevice`(V35, IoT 미보고면 null).
+- `GET /api/devices/{deviceId}/cameras/{cameraId}/sources`: 아래 카메라 원본 절. 없는 카메라 404.
 - `POST /api/devices/{deviceId}/cameras/{cameraId}/view-session`: 관리자 세션+CSRF 필요. 정확한 카메라 경로만 읽을 수 있는 5분짜리 토큰과 WHEP URL 반환.
 - `GET /api/events`: `{items: [...], total, page, size}`.
 - 선택 필터: `deviceId`, `type`, `from`, `to` (발생 시각 기준, 양 끝 포함).
@@ -109,6 +110,31 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 ```
 
 `streamStatus`는 `STARTING`, `STREAMING`, `OFFLINE`, `ERROR` 중 하나입니다. 영상 publish는 `devices/{deviceId}/{cameraId}` 경로만 허용하며 중앙 장치 토큰을 MediaMTX 외부 인증에서 다시 검증합니다.
+
+`width`·`height`·`fps`는 **송출 해상도**입니다. 카메라 장치의 원본과 다를 수 있습니다.
+
+### 카메라 원본 장치·해상도 (2026-10-08, V35)
+
+같은 `cameraId`(`usb-0`)에 다른 웹캠을 꽂으면 원본 크기·비율이 바뀝니다(Insta360 16:9 → FHD Camera 4:3). 원본을 송출 해상도와 따로 받습니다.
+
+- `cameras/status` 선택 필드: `sourceWidth`·`sourceHeight`(1~16384, **둘 다 보내거나 둘 다 생략**, 한쪽만이면 400), `sourceDevice`(장치 이름, 최대 120자, 예: V4L2 카드 이름 `FHD Camera`).
+- 예: `{"deviceId":"iot-jetson-001","cameraId":"usb-0","displayName":"현장 웹캠","streamStatus":"STREAMING","width":640,"height":480,"fps":5.0,"sourceWidth":640,"sourceHeight":480,"sourceDevice":"FHD Camera"}`
+- `sourceWidth`·`sourceHeight`는 워커가 실제로 받는 프레임 크기(추론 입력 `frame_width`×`frame_height`)입니다. 장치 최대 해상도가 아닙니다.
+- 원본 필드를 생략하면(이전 IoT) 중앙은 마지막 보고값을 지우지 않습니다. 장치를 떼어도 마지막 값이 남습니다.
+- 원본 값(크기·이름)이 직전 이력과 다르면 `camera_source_history`에 새 행을 만들고, 같으면 `lastSeenAt`만 갱신합니다.
+
+`GET /api/devices/{deviceId}/cameras/{cameraId}/sources` (관리자 세션):
+
+```json
+{"reported":[{"sourceWidth":640,"sourceHeight":480,"sourceDevice":"FHD Camera","firstSeenAt":"…","lastSeenAt":"…"}],
+ "snapshots":[{"width":768,"height":576,"count":120,"firstAt":"…","lastAt":"…"},{"width":768,"height":432,"count":80,"firstAt":"…","lastAt":"…"}],
+ "samples":[…]}
+```
+
+- `reported`: 원본 보고 이력, 최근 10개.
+- `snapshots`: 탐지 원본 프레임(긴 변 768px 축소본) 크기가 연속으로 같았던 구간, 촬영 시각 기준 최근 10개. 원본 필드를 보고하지 않는 IoT에서도 크기가 바뀐 시점을 웹캠 교체 시점으로 볼 수 있습니다. 사람이 감지될 때만 사진이 오므로 대략적인 시점입니다.
+- `samples`: 학습용 수집 이미지(`training_samples`) 크기 구간, 같은 형식.
+- 박스 좌표는 0~1 정규 좌표라 장치가 바뀌어도 그대로 씁니다. 화면에는 각 사진의 실제 크기 비율로 그립니다.
 
 ## 시청 중에만 송출: 송출 임대 (2026-10-04, V27)
 
@@ -191,7 +217,8 @@ API 오류 형식은 `{"error":"CODE"}`입니다. Nginx 자체 오류(429,502 �
 |---|---|
 | POST `/api/iot/training-samples` | 장치 Bearer, multipart `file`, `deviceId`, `cameraId`, `capturedAt`, `title`; JPEG/PNG 최대 10 MiB, 각 변 최소 32px·총 2천만 픽셀 이하. 촬영 시각은 서버보다 5분 초과 미래 불가. 정상·중복 모두 샘플 반환 |
 | GET `/api/training/stats` | 수집 상태·작업 집계; `labeled`, `autoQueued`, `autoRunning` 포함 |
-| GET `/api/training/samples` | `page`, `deviceId`, `status` 필터; `{items,total,page,size}`, 페이지당 40개 |
+| GET `/api/training/samples` | `page`, `deviceId`, `status`, `cameraId`, `size`(`768x576` 형식, 이미지 가로×세로) 필터; `{items,total,page,size}`, 페이지당 40개 |
+| GET `/api/training/samples/sizes` | 선택 `deviceId`, `status`. 장치·카메라·이미지 크기별 `{deviceId,cameraId,width,height,count,firstAt,lastAt}` 배열(최대 100). 같은 카메라의 웹캠 교체 전후 이미지를 나눠 보는 용도 |
 | GET `/api/training/samples/{id}` | 이미지 메타데이터·최신 결과 |
 | GET `/api/training/samples/{id}/image` | 관리자 인증 JPEG |
 | GET `/api/training/label-jobs` | `page`, 선택 `sampleId`로 작업 이력 조회 |
@@ -238,7 +265,7 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 | GET /api/training/runs/{id} | 실행 요약 조회 |
 | POST /api/training/runs/{id}/train | `{epochs: 1~100}`. DATASET_READY에서만 TRAINING으로 전이. |
 | POST /api/training/runs/{id}/evaluate | TRAINED에서만 EVALUATING으로 전이. 기준·후보 모델을 같은 test에서 평가. |
-| POST /api/training/runs/{id}/release | EVALUATED이고 평가를 통과한 파일만 SHA-256 확인 후 후보 등록. |
+| POST /api/training/runs/{id}/release | EVALUATED이고 평가를 통과한 파일만 SHA-256 확인 후 후보 등록. `?override=true`면 관리자 판단으로 평가 미달 실행도 등록하고 summary `releaseOverride {by, at}`에 남긴다(자동 경로는 쓰지 않음). 이런 후보는 자동 파이프라인 LATEST 베이스에서 제외한다. |
 | GET /api/training/models | 등록된 후보 최대 100개. id, sha256, sizeBytes, createdAt, name(기본 모델 라벨·파이프라인 또는 실행 이름), source(BASE·MANUAL·AUTO), candidateMap·baselineMap(평가 test mAP50–95, BASE는 평가 기준으로 쓰인 최근 값). |
 | GET /api/training/deployments | 최근 배포 요청 40개 |
 | POST /api/training/deployments/{id}/cancel | 적용 전 배포 요청 취소(CANCELED) |

@@ -27,6 +27,10 @@ async function post<T>(path: string, body: object) {
   return api<T>(path, { method: "POST", headers: { [csrf.headerName]: csrf.token, "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
+type SizeFacet = { deviceId: string; cameraId: string | null; width: number; height: number; count: number; firstAt: string; lastAt: string };
+const aspect = (w: number, h: number) => Math.abs(w / h - 16 / 9) < 0.02 ? "16:9" : Math.abs(w / h - 4 / 3) < 0.02 ? "4:3" : `${(w / h).toFixed(2)}:1`;
+const shortDay = (value: string) => new Date(value).toLocaleDateString("ko-KR", { month: "2-digit", day: "2-digit" });
+
 export default function CollectionPage({ initialStatus = "", title = "수집 데이터 현황", stage = "" }: { initialStatus?: string; title?: string; stage?: string }) {
   const router = useRouter();
   const [data, setData] = useState<Page>({ items: [], total: 0, page: 0, size: 40 });
@@ -37,6 +41,9 @@ export default function CollectionPage({ initialStatus = "", title = "수집 데
   const [jobs, setJobs] = useState<Job[]>([]);
   const [page, setPage] = useState(0);
   const [device, setDevice] = useState("");
+  // 카메라·이미지 크기 필터("usb-0|768x576"). 같은 usb-0이라도 웹캠을 바꾸면 크기가 달라진다.
+  const [variant, setVariant] = useState("");
+  const [sizes, setSizes] = useState<SizeFacet[]>([]);
   const [status, setStatus] = useState(initialStatus);
   const [preview, setPreview] = useState<Sample | null>(null);
   const [history, setHistory] = useState<Job[]>([]);
@@ -55,14 +62,19 @@ export default function CollectionPage({ initialStatus = "", title = "수집 데
     const query = new URLSearchParams({ page: String(page) });
     if (device) query.set("deviceId", device);
     if (status) query.set("status", status);
-    const [images, counts, recentJobs, deviceList, reviewed] = await Promise.all([
+    const [variantCamera, variantSize] = variant ? variant.split("|") : ["", ""];
+    const variantQuery = variant ? `&cameraId=${encodeURIComponent(variantCamera)}&size=${variantSize}` : "";
+    if (variant) { query.set("cameraId", variantCamera); query.set("size", variantSize); }
+    const [images, counts, recentJobs, deviceList, reviewed, sizeList] = await Promise.all([
       api<Page>(`/training/samples?${query}`, { signal }), api<Stats>("/training/stats", { signal }),
       api<Job[]>("/training/label-jobs", { signal }), api<Device[]>("/devices", { signal }),
-      api<Page>(`/training/samples?status=LABELED&page=${approvedPage}${device ? `&deviceId=${encodeURIComponent(device)}` : ""}`, { signal }),
+      api<Page>(`/training/samples?status=LABELED&page=${approvedPage}${device ? `&deviceId=${encodeURIComponent(device)}` : ""}${variantQuery}`, { signal }),
+      // 크기 집계는 보조 정보라 실패해도 목록 갱신을 막지 않는다.
+      device ? api<SizeFacet[]>(`/training/samples/sizes?deviceId=${encodeURIComponent(device)}`, { signal }).catch(() => []) : Promise.resolve([]),
     ]);
     if (signal?.aborted) return;
-    setApproved(reviewed); setData(images); setStats(counts); setJobs(recentJobs); setDevices(deviceList); setUpdatedAt(new Date().toISOString());
-  }, [page, device, status, approvedPage]);
+    setApproved(reviewed); setData(images); setStats(counts); setJobs(recentJobs); setDevices(deviceList); setSizes(sizeList); setUpdatedAt(new Date().toISOString());
+  }, [page, device, status, approvedPage, variant]);
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
@@ -106,7 +118,8 @@ export default function CollectionPage({ initialStatus = "", title = "수집 데
       </section><p className="muted">전체 작업 대기 {stats?.queued ?? "—"}건 · 실행 중 {stats?.running ?? "—"}건 · 제외 {stats?.excluded ?? "—"}장 · 마지막 수신 {date(stats?.lastReceivedAt ?? null)}</p>
       {stage !== "label" && <UploadPanel onUploaded={() => void refresh().catch(fail)} />}
       <section className="training-card"><div className="collection-heading"><div><h2>수집된 이미지</h2><p className="muted">조회 결과 {data.total}장 · 최근 갱신 {date(updatedAt)}</p></div><div className="training-actions">
-        <label>장치 <select value={device} onChange={e => { setDevice(e.target.value); setPage(0); setApprovedPage(0);  }}><option value="">전체 장치</option>{devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.name}</option>)}</select></label>
+        <label>장치 <select value={device} onChange={e => { setDevice(e.target.value); setVariant(""); setPage(0); setApprovedPage(0);  }}><option value="">전체 장치</option>{devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.name}</option>)}</select></label>
+        {device && sizes.length > 0 && <label>카메라·크기 <select value={variant} onChange={e => { setVariant(e.target.value); setPage(0); setApprovedPage(0); }}><option value="">전체</option>{sizes.map(f => { const key = `${f.cameraId ?? ""}|${f.width}x${f.height}`; return <option key={key} value={key}>{f.cameraId || "카메라 없음"} · {f.width}×{f.height} ({aspect(f.width, f.height)}) · {f.count}장 · {shortDay(f.firstAt)}~{shortDay(f.lastAt)}</option>; })}</select></label>}
         <label>상태 <select value={status} onChange={e => { setStatus(e.target.value); setPage(0);  }}><option value="">전체 상태</option>{["NEW", "LABELED", "EXCLUDED"].map(value => <option key={value} value={value}>{names[value]}</option>)}</select></label>
 
       </div></div>

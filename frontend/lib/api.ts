@@ -86,6 +86,16 @@ export type DeviceCamera = {
   lastStreamAt: string | null;
   lastError: string | null;
   updatedAt: string;
+  /** 카메라 장치의 원본 해상도·이름(IoT 선택 보고). width/height는 송출 해상도다. */
+  sourceWidth: number | null;
+  sourceHeight: number | null;
+  sourceDevice: string | null;
+};
+export type SizePeriod = { width: number; height: number; count: number; firstAt: string; lastAt: string };
+export type CameraSources = {
+  reported: { sourceWidth: number; sourceHeight: number; sourceDevice: string | null; firstSeenAt: string; lastSeenAt: string }[];
+  snapshots: SizePeriod[];
+  samples: SizePeriod[];
 };
 export type Event = {
   eventId: string;

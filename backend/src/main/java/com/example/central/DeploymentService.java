@@ -81,15 +81,38 @@ public class DeploymentService {
     try(var input=Files.newInputStream(path)) {byte[] bytes=new byte[65536];int n;while((n=input.read(bytes))!=-1) digest.update(bytes,0,n);}
     return HexFormat.of().formatHex(digest.digest());
   }
-  @Transactional public DeploymentMapper.Model register(String id) throws Exception {
+  @Transactional public DeploymentMapper.Model register(String id) throws Exception {return register(id,null);}
+  /**
+   * 평가를 마친 실행을 배포 후보로 등록한다. overrideBy(관리자)가 있으면 평가 기준 미달이어도 등록하고 summary.releaseOverride에 남긴다.
+   * 자동 경로는 overrideBy 없이 호출하므로 기준 미달이면 그대로 멈춘다.
+   */
+  @Transactional public DeploymentMapper.Model register(String id,String overrideBy) throws Exception {
     var run=training.lock(id);
     TrainingService.require(run!=null && run.state().equals("EVALUATED"),"EVALUATED_MODEL_REQUIRED");
     var summary=json.readTree(run.summary());
-    TrainingService.require(summary.path("evaluation").path("eligibleForPromotion").asBoolean(false),"EVALUATION_REJECTED");
+    boolean eligible=summary.path("evaluation").path("eligibleForPromotion").asBoolean(false);
+    TrainingService.require(eligible || overrideBy!=null,"EVALUATION_REJECTED");
+    if(!eligible) copyCandidate(id,summary.path("modelSha256").asText());
     Path file=file(id); long size=Files.size(file);String hash=hash(file);
     TrainingService.require(size>0 && size<=536870912L && hash.equals(summary.path("modelSha256").asText()),"MODEL_HASH_MISMATCH");
+    if(!eligible && training.released(id)==0)
+      training.note(id,json.writeValueAsString(Map.of("releaseOverride",Map.of("by",overrideBy,"at",java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).toString()))));
     db.register(id,hash,size);var model=db.model(id);
     TrainingService.require(model.sha256().equals(hash) && model.sizeBytes()==size,"MODEL_VERSION_IMMUTABLE");return model;
+  }
+  /** 워커는 평가 통과 실행만 release/model.pt로 복사하므로, 관리자 허용 등록 때 학습 결과(model.json weights)를 해시 확인 후 복사한다. */
+  void copyCandidate(String id,String sha) throws Exception {
+    TrainingService.require(root!=null,"MODEL_STORAGE_UNAVAILABLE");
+    Path folder=root.resolve(UUID.fromString(id).toString());Path target=folder.resolve("release/model.pt");
+    if(Files.isRegularFile(target)) return;
+    Path meta=folder.resolve("model.json");TrainingService.require(Files.isRegularFile(meta),"MODEL_FILE_MISSING");
+    Path weights=Path.of(json.readTree(Files.readString(meta)).path("weights").asText(""));
+    TrainingService.require(Files.isRegularFile(weights) && weights.toRealPath().startsWith(folder.toRealPath()),"MODEL_FILE_MISSING");
+    TrainingService.require(hash(weights).equals(sha),"MODEL_HASH_MISMATCH");
+    Files.createDirectories(target.getParent());Path temp=target.resolveSibling("model.pt.tmp");
+    Files.copy(weights,temp,StandardCopyOption.REPLACE_EXISTING);
+    TrainingService.require(hash(temp).equals(sha),"MODEL_HASH_MISMATCH");
+    Files.move(temp,target,StandardCopyOption.ATOMIC_MOVE);
   }
   /** 배포 요청 경로. MANUAL은 관리자 요청, AUTO는 자동 파이프라인이다. */
   enum Source {MANUAL,AUTO}

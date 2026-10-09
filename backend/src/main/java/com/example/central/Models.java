@@ -68,7 +68,10 @@ public final class Models {
       Double fps,
       OffsetDateTime lastStreamAt,
       String lastError,
-      OffsetDateTime updatedAt) {}
+      OffsetDateTime updatedAt,
+      Integer sourceWidth,
+      Integer sourceHeight,
+      String sourceDevice) {}
 
   public record CameraStatus(
       @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
@@ -78,7 +81,27 @@ public final class Models {
       @Min(1) @Max(16384) Integer width,
       @Min(1) @Max(16384) Integer height,
       @DecimalMin("0.1") @DecimalMax("240") Double fps,
-      @Size(max = 300) String lastError) {}
+      @Size(max = 300) String lastError,
+      // 선택: 카메라 장치가 실제로 내는 원본 해상도와 장치 이름. width/height는 송출 해상도다(V35).
+      @Min(1) @Max(16384) Integer sourceWidth,
+      @Min(1) @Max(16384) Integer sourceHeight,
+      @Size(max = 120) String sourceDevice) {
+    @AssertTrue(message = "sourceWidth와 sourceHeight는 함께 보낸다")
+    public boolean isSourcePair() {
+      return (sourceWidth == null) == (sourceHeight == null);
+    }
+  }
+
+  /** 카메라 원본 장치·해상도 보고 이력(V35). */
+  public record CameraSource(
+      Integer sourceWidth, Integer sourceHeight, String sourceDevice,
+      OffsetDateTime firstSeenAt, OffsetDateTime lastSeenAt) {}
+
+  /** 연속으로 같은 크기였던 원본 사진·수집 이미지 구간. */
+  public record SizePeriod(int width, int height, long count, OffsetDateTime firstAt, OffsetDateTime lastAt) {}
+
+  public record CameraSources(
+      List<CameraSource> reported, List<SizePeriod> snapshots, List<SizePeriod> samples) {}
 
   public record ViewSession(String whepUrl, String token, OffsetDateTime expiresAt) {}
 

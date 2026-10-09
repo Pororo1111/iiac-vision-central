@@ -41,7 +41,7 @@ export default function TrainingRuns({ step }: { step: string }) {
     try {
       await csrfJson(path, body);
       setRuns(await api<Run[]>("/training/runs")); setSelected([]);
-      setNotice(path.endsWith("/release") ? "배포 후보로 등록했습니다. 모델 배포 단계에서 선택할 수 있습니다." : "작업을 등록했습니다. 아래 실행 이력에서 진행 상태를 확인하세요.");
+      setNotice(path.includes("/release") ? "배포 후보로 등록했습니다. 모델 배포 단계에서 선택할 수 있습니다." : "작업을 등록했습니다. 아래 실행 이력에서 진행 상태를 확인하세요.");
     } catch (cause) {
       const code = cause instanceof Error ? cause.message : "";
       setError(code === "TRAINING_BUSY" ? "다른 학습 작업이 진행 중입니다. 완료 후 다시 시도하세요." : code === "LABELED_SAMPLE_REQUIRED" ? "자동 라벨링을 완료한 이미지를 선택하세요." : "요청을 처리하지 못했습니다. 선택 항목과 실행 상태를 확인하세요.");
@@ -80,6 +80,7 @@ export default function TrainingRuns({ step }: { step: string }) {
         {summary.automation && <p>자동 진행: {[summary.automation.release, summary.automation.deployment].filter(Boolean).map(value => automationText[value!] ?? value).join(" → ")}{summary.automation.reason && ` (${summary.automation.reason})`}</p>}
         {step === "train" && run.state === "DATASET_READY" && <button disabled={busy || active || !Number.isInteger(epochs) || epochs < 1 || epochs > 100} onClick={() => void submit(`/training/runs/${run.id}/train`, { epochs })}>후보 모델 학습 시작</button>}
         {step === "train" && run.state === "EVALUATED" && summary.evaluation?.eligibleForPromotion && <button disabled={busy} onClick={() => void submit(`/training/runs/${run.id}/release`, {})}>배포 후보 등록</button>}
+        {step === "train" && run.state === "EVALUATED" && summary.evaluation && !summary.evaluation.eligibleForPromotion && <button disabled={busy} onClick={() => { if (window.confirm("평가 기준에 미달한 모델입니다. 그래도 배포 후보로 등록할까요?")) void submit(`/training/runs/${run.id}/release?override=true`, {}); }}>미달이지만 배포 허용</button>}
         {step === "train" && run.state === "TRAINED" && <button disabled={busy || active} onClick={() => void submit(`/training/runs/${run.id}/evaluate`, {})}>기준 모델과 평가</button>}
       </article>;
     })}

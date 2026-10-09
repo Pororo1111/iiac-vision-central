@@ -14,7 +14,7 @@
 .upload-row label, .box-row label, .wide-field { display: flex; flex-direction: column; gap: 6px; }
 .check-label { display: inline-flex !important; flex-direction: row !important; align-items: center; gap: 8px; margin: 8px 12px 8px 0; }
 .sample-row { display: flex; gap: 12px; width: 100%; text-align: left; padding: 10px; margin-bottom: 8px; }
-.sample-row img { object-fit: cover; border-radius: 4px; }
+.sample-row img { object-fit: contain; border-radius: 4px; }
 .sample-row strong { overflow-wrap: anywhere; }.sample-row small { display: block; color: var(--muted); margin-top: 6px; }
 .sample-row.selected { border-color: var(--teal); background: #eff9f6; }
 .annotation-image { position: relative; width: 100%; overflow: hidden; margin: 20px 0; background: #102e35; }
@@ -48,7 +48,7 @@
 .prompt-preview-heading span { color:var(--muted); font-size:12px; }
 .prompt-preview-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
 .prompt-preview-item, .prompt-preview-empty { position:relative; aspect-ratio:1; min-width:0; border:1px solid var(--line); border-radius:8px; overflow:hidden; padding:0; background:#e9eff1; }
-.prompt-preview-item img { width:100%; height:100%; object-fit:cover; display:block; }
+.prompt-preview-item img { width:100%; height:100%; object-fit:contain; display:block; }
 .prompt-preview-item > span, .prompt-preview-empty > span { position:absolute; top:6px; left:6px; display:grid; place-items:center; width:22px; height:22px; border-radius:50%; background:rgba(16,46,53,.82); color:white; font-size:11px; font-weight:700; }
 .prompt-preview-empty { display:grid; place-items:center; color:var(--muted); border-style:dashed; }
 .prompt-preview-empty small { padding-top:24px; }
@@ -1221,6 +1221,17 @@ tr.row-focus td { background: #eef8f6; }
 .device-facts span { color: var(--muted); font-size: 12px; }
 .device-facts strong { display: block; font-size: 20px; margin: 10px 0 8px; overflow-wrap: anywhere; }
 .device-facts small { color: #899ba1; font-size: 11px; }
+/* 카메라 원본(camera-sources.tsx) */
+.camera-sources { display: grid; gap: 14px; }
+.camera-sources article { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.camera-sources h3 { margin: 0 0 10px; font-size: 14px; }
+.camera-sources dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 0; }
+.camera-sources dt { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.camera-sources dd { margin: 0; min-width: 0; }
+.camera-sources dd strong { display: block; font-size: 16px; }
+.camera-sources dd small { display: block; color: #899ba1; font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+@media (max-width: 900px) { .camera-sources dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .camera-sources dl { grid-template-columns: 1fr; } }
 .device-facts .fact-model { font-size: 13px; }
 .device-facts .fact-error { font-size: 13px; font-weight: 500; line-height: 1.5; }
 .device-facts .fact-alert { border-color: #f1c4bf; background: #fff8f7; }
@@ -1284,7 +1295,7 @@ tr.row-focus td { background: #eef8f6; }
 .vsx-card header { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12.5px; font-weight:700; }
 .vsx-card header button { font-size:11px; padding:3px 8px; font-weight:500; }
 .vsx-thumb { position:relative; padding:0 !important; border:0 !important; border-radius:8px !important; overflow:hidden; aspect-ratio:16/9; background:#e8eff1 !important; display:block; width:100%; }
-.vsx-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.vsx-thumb img { width:100%; height:100%; object-fit:contain; display:block; }
 .vsx-thumb-empty { display:grid; place-items:center; height:100%; color:var(--muted); font-size:12px; }
 .vsx-play { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:40px; height:40px; border-radius:50%; display:grid; place-items:center; background:rgba(23,127,117,.9); color:white; font-size:15px; transition:transform .15s; }
 .vsx-thumb:hover .vsx-play { transform:translate(-50%,-50%) scale(1.1); }

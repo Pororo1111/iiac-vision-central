@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, csrfJson, type Device, type DeviceLogs } from "../../lib/api";
 import { monitoringState, restartNames, restartState, runtimeNames } from "../../lib/device-status";
+import CameraSourcesPanel from "./camera-sources";
 import LiveCamera from "./live-camera";
 import SideNav from "./side-nav";
 
@@ -207,6 +208,8 @@ export default function DeviceDetail({ deviceId }: { deviceId: string }) {
                   <small>IoT가 heartbeat로 보고한 오류</small>
                 </article>
               </section>
+
+              <CameraSourcesPanel deviceId={deviceId} />
 
               <section className="panel">
                 <div className="panel-heading">

@@ -119,22 +119,71 @@ public interface CentralMapper {
   List<Models.DeviceLog> logs(String id);
 
   @Insert(
-      "INSERT INTO device_cameras(device_id,camera_id,display_name,stream_status,width,height,fps,last_stream_at,last_error)"
+      "INSERT INTO device_cameras(device_id,camera_id,display_name,stream_status,width,height,fps,last_stream_at,last_error,"
+          + "source_width,source_height,source_device)"
           + " VALUES(#{deviceId},#{cameraId},#{displayName},#{streamStatus},#{width},#{height},#{fps},"
-          + " CASE WHEN #{streamStatus}='STREAMING' THEN now() ELSE NULL END,#{lastError})"
+          + " CASE WHEN #{streamStatus}='STREAMING' THEN now() ELSE NULL END,#{lastError},"
+          + "#{sourceWidth},#{sourceHeight},#{sourceDevice})"
           + " ON CONFLICT(device_id,camera_id) DO UPDATE SET display_name=excluded.display_name,"
           + " stream_status=excluded.stream_status,width=excluded.width,height=excluded.height,fps=excluded.fps,"
           + " last_stream_at=CASE WHEN excluded.stream_status='STREAMING' THEN now() ELSE device_cameras.last_stream_at END,"
-          + " last_error=excluded.last_error,updated_at=now()")
+          + " last_error=excluded.last_error,updated_at=now(),"
+          // 원본 필드를 보내지 않는 IoT(이전 버전)는 마지막 보고값을 지우지 않는다.
+          + " source_width=COALESCE(excluded.source_width,device_cameras.source_width),"
+          + " source_height=COALESCE(excluded.source_height,device_cameras.source_height),"
+          + " source_device=CASE WHEN excluded.source_width IS NULL THEN device_cameras.source_device"
+          + " ELSE excluded.source_device END")
   void upsertCamera(CameraStatus status);
 
+  /** 원본 보고값이 최근 이력과 같으면 last_seen_at만 갱신하고, 다르면(장치 교체) 새 행을 만든다. */
+  @Update(
+      "UPDATE camera_source_history SET last_seen_at=now() WHERE id=(SELECT id FROM camera_source_history"
+          + " WHERE device_id=#{deviceId} AND camera_id=#{cameraId} ORDER BY first_seen_at DESC,id DESC LIMIT 1)"
+          + " AND source_width=#{sourceWidth} AND source_height=#{sourceHeight}"
+          + " AND source_device IS NOT DISTINCT FROM #{sourceDevice}")
+  int touchCameraSource(CameraStatus status);
+
+  @Insert(
+      "INSERT INTO camera_source_history(device_id,camera_id,source_width,source_height,source_device)"
+          + " VALUES(#{deviceId},#{cameraId},#{sourceWidth},#{sourceHeight},#{sourceDevice})")
+  void insertCameraSource(CameraStatus status);
+
   @Select(
-      "SELECT device_id,camera_id,display_name,stream_status,width,height,fps,last_stream_at,last_error,updated_at"
+      "SELECT source_width,source_height,source_device,first_seen_at,last_seen_at FROM camera_source_history"
+          + " WHERE device_id=#{deviceId} AND camera_id=#{cameraId} ORDER BY first_seen_at DESC,id DESC LIMIT 10")
+  List<Models.CameraSource> cameraSources(@Param("deviceId") String deviceId, @Param("cameraId") String cameraId);
+
+  /** 장치가 보낸 원본 사진(긴 변 768px 축소본) 크기가 연속으로 같았던 구간, 최근 10개. */
+  @Select(
+      "WITH s AS (SELECT s.width,s.height,s.captured_at AS at FROM detection_snapshots s"
+          + " JOIN detection_batches b USING(batch_id) WHERE b.device_id=#{deviceId} AND b.camera_id=#{cameraId}),"
+          + " g AS (SELECT *,CASE WHEN (width,height) IS DISTINCT FROM"
+          + " (LAG(width) OVER (ORDER BY at),LAG(height) OVER (ORDER BY at)) THEN 1 ELSE 0 END AS changed FROM s),"
+          + " r AS (SELECT *,SUM(changed) OVER (ORDER BY at ROWS UNBOUNDED PRECEDING) AS grp FROM g)"
+          + " SELECT width,height,COUNT(*) AS count,MIN(at) AS first_at,MAX(at) AS last_at FROM r"
+          + " GROUP BY grp,width,height ORDER BY first_at DESC LIMIT 10")
+  List<Models.SizePeriod> snapshotSizes(@Param("deviceId") String deviceId, @Param("cameraId") String cameraId);
+
+  /** 이 카메라에서 들어온 학습용 수집 이미지 크기가 연속으로 같았던 구간, 최근 10개. */
+  @Select(
+      "WITH s AS (SELECT width,height,COALESCE(captured_at,created_at) AS at FROM training_samples"
+          + " WHERE device_id=#{deviceId} AND camera_id=#{cameraId}),"
+          + " g AS (SELECT *,CASE WHEN (width,height) IS DISTINCT FROM"
+          + " (LAG(width) OVER (ORDER BY at),LAG(height) OVER (ORDER BY at)) THEN 1 ELSE 0 END AS changed FROM s),"
+          + " r AS (SELECT *,SUM(changed) OVER (ORDER BY at ROWS UNBOUNDED PRECEDING) AS grp FROM g)"
+          + " SELECT width,height,COUNT(*) AS count,MIN(at) AS first_at,MAX(at) AS last_at FROM r"
+          + " GROUP BY grp,width,height ORDER BY first_at DESC LIMIT 10")
+  List<Models.SizePeriod> sampleSizes(@Param("deviceId") String deviceId, @Param("cameraId") String cameraId);
+
+  @Select(
+      "SELECT device_id,camera_id,display_name,stream_status,width,height,fps,last_stream_at,last_error,updated_at,"
+          + "source_width,source_height,source_device"
           + " FROM device_cameras WHERE device_id=#{deviceId} ORDER BY camera_id")
   List<DeviceCamera> cameras(String deviceId);
 
   @Select(
-      "SELECT device_id,camera_id,display_name,stream_status,width,height,fps,last_stream_at,last_error,updated_at"
+      "SELECT device_id,camera_id,display_name,stream_status,width,height,fps,last_stream_at,last_error,updated_at,"
+          + "source_width,source_height,source_device"
           + " FROM device_cameras WHERE device_id=#{deviceId} AND camera_id=#{cameraId}")
   DeviceCamera camera(@Param("deviceId") String deviceId, @Param("cameraId") String cameraId);
 

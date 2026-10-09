@@ -34,6 +34,15 @@ public class MediaService {
     this.apiUrl = apiUrl.replaceAll("/+$", "");
   }
 
+  /** 카메라 상태 저장. 원본 해상도를 보내면 바뀐 경우에만 이력 행을 새로 만든다. */
+  @org.springframework.transaction.annotation.Transactional
+  public void report(Models.CameraStatus status) {
+    mapper.upsertCamera(status);
+    if (status.sourceWidth() != null && mapper.touchCameraSource(status) == 0) {
+      mapper.insertCameraSource(status);
+    }
+  }
+
   public ViewSession create(String deviceId, String cameraId) {
     var device = mapper.device(deviceId);
     var camera = mapper.camera(deviceId, cameraId);

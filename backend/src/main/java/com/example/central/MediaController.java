@@ -29,7 +29,7 @@ public class MediaController {
       throw new org.springframework.web.server.ResponseStatusException(
           org.springframework.http.HttpStatus.FORBIDDEN, "DEVICE_MISMATCH");
     }
-    mapper.upsertCamera(status);
+    media.report(status);
     return Map.of("accepted", true);
   }
 
@@ -37,6 +37,18 @@ public class MediaController {
   public List<DeviceCamera> cameras(
       @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId) {
     return mapper.cameras(deviceId);
+  }
+
+  /** 원본 장치·해상도 보고 이력과 원본 사진·수집 이미지 크기 구간. 장치 교체 시점 확인용이다. */
+  @GetMapping("/api/devices/{deviceId}/cameras/{cameraId}/sources")
+  public CameraSources sources(
+      @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
+      @PathVariable @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String cameraId) {
+    if (mapper.camera(deviceId, cameraId) == null) {
+      throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND);
+    }
+    return new CameraSources(mapper.cameraSources(deviceId, cameraId),
+        mapper.snapshotSizes(deviceId, cameraId), mapper.sampleSizes(deviceId, cameraId));
   }
 
   @PostMapping("/api/devices/{deviceId}/cameras/{cameraId}/view-session")

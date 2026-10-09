@@ -24,7 +24,10 @@ public class DeploymentController {
     return service.setPolicy(deviceId,body.mode(),body.modelId()==null?null:body.modelId().toString(),body.note()==null?"":body.note().strip(),principal.getName());
   }
   @GetMapping("/api/training/device-policies/{deviceId}/history") public List<DeploymentMapper.PolicyHistory> policyHistory(@PathVariable @Size(max=64) String deviceId){return db.history(deviceId);}
-  @PostMapping("/api/training/runs/{id}/release") public DeploymentMapper.Model release(@PathVariable UUID id) throws Exception{return service.register(id.toString());}
+  /** override=true: 평가 기준 미달 실행도 관리자 판단으로 후보 등록한다. */
+  @PostMapping("/api/training/runs/{id}/release") public DeploymentMapper.Model release(@PathVariable UUID id,@RequestParam(defaultValue="false") boolean override,Principal principal) throws Exception {
+    return service.register(id.toString(),override?principal.getName():null);
+  }
   @GetMapping("/api/training/deployments") public List<DeploymentMapper.Deployment> deployments(){return db.deployments();}
   @PostMapping("/api/training/deployments") public ResponseEntity<DeploymentMapper.Deployment> create(@Valid @RequestBody Create body) throws Exception{return ResponseEntity.accepted().body(service.create(body.modelId().toString(),body.deviceId(),DeploymentService.Source.MANUAL));}
   @PostMapping("/api/training/deployments/{id}/cancel") public DeploymentMapper.Deployment cancel(@PathVariable UUID id,Principal principal){return service.cancel(id.toString(),principal.getName());}

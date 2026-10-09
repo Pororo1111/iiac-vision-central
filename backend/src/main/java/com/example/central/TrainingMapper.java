@@ -31,7 +31,7 @@ public interface TrainingMapper {
         AND NOT EXISTS (SELECT 1 FROM training_runs r, jsonb_array_elements(r.snapshot) e WHERE e->>'id'=s.id::text)""";
   @Select("SELECT s.id::text "+UNUSED_IOT+" ORDER BY s.created_at DESC,s.id LIMIT #{limit}") List<String> unusedIot(int limit);
   @Select("SELECT count(*) "+UNUSED_IOT) int unusedIotCount();
-  @Select("SELECT id::text FROM model_releases WHERE kind='RUN' ORDER BY created_at DESC,id LIMIT 1") String latestRelease();
+  @Select("SELECT m.id::text FROM model_releases m JOIN training_runs r ON r.id=m.id WHERE m.kind='RUN' AND r.summary->'releaseOverride' IS NULL ORDER BY m.created_at DESC,m.id LIMIT 1") String latestRelease();
   @Insert("INSERT INTO training_tasks(id,run_id,action,status,parameters) VALUES(#{id}::uuid,#{run}::uuid,#{action},'QUEUED',#{parameters}::jsonb)") void enqueue(String id,String run,String action,String parameters);
   @Update("UPDATE training_runs SET state=#{state},summary=summary || #{summary}::jsonb,updated_at=now() WHERE id=#{id}::uuid") void state(String id,String state,String summary);
   @Select("SELECT "+TASK+" FROM training_tasks WHERE id=#{id}::uuid FOR UPDATE") Task task(String id);

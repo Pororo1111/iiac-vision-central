@@ -77,6 +77,7 @@ export function cells(view: View, eta?: Eta, step?: Step): Cell[] {
   const latest = deployments[0];
   const deploy: Cell = !latest ? { status: "pending", text: "배포 가능" }
     : { status: latest.status === "APPLIED" ? "success" : ["FAILED", "ROLLED_BACK", "CANCELED"].includes(latest.status) ? "failed" : "running", text: `${latest.deviceId} · ${deployName[latest.status] ?? latest.status}` };
+  if (summary.releaseOverride) return [collect, label, dataset, { status: "unstable", text: `평가 미달 · 관리자 허용 ${delta}${site(evaluation)}` }, deploy];
   return [collect, label, dataset, { status: "success", text: `통과 ${delta}${site(evaluation)}` }, deploy];
 }
 
@@ -159,6 +160,11 @@ export default function PipelinesPage() {
     setError(""); setMessage("");
     try { await csrfJson(`/training/runs/${view.run.id}/stop`, {}); setMessage(`${view.pipeline.name} 학습을 중단했습니다.`); await refresh(); } catch (cause) { fail(cause); }
   }
+  async function allow(view: View) {
+    if (!view.run || !window.confirm(`${view.pipeline.name}은 평가 기준(기준 test mAP50–95)에 미달했습니다. 그래도 배포 후보로 등록할까요? 자동 파이프라인의 이어학습 베이스(LATEST)로는 쓰지 않습니다.`)) return;
+    setError(""); setMessage("");
+    try { await csrfJson(`/training/runs/${view.run.id}/release?override=true`, {}); setMessage(`${view.pipeline.name}을 배포 후보로 등록했습니다. 배포 버튼으로 장치에 배포할 수 있습니다.`); await refresh(); } catch (cause) { fail(cause); }
+  }
   async function remove(view: View) {
     if (!window.confirm(`${view.pipeline.name} 파이프라인을 삭제할까요? 학습 기록과 학습 결과 파일이 지워지며 되돌릴 수 없습니다. 수집·업로드한 이미지는 남습니다.`)) return;
     setError(""); setMessage("");
@@ -202,6 +208,7 @@ export default function PipelinesPage() {
     : <strong className="name-pending">{view.pipeline.nameStatus === "GENERATING" ? "✨ Gemma가 이름 짓는 중…" : "✨ Gemma 이름 추천 대기"}</strong>}</>;
   const actions = (view: View, r: ReturnType<typeof rowOf>) => <>
     {view.release && <button className="primary" disabled={!r.canDeploy} onClick={() => void openDeploy(view)}>배포</button>}
+    {!view.release && view.run?.state === "EVALUATED" && <button onClick={() => void allow(view)}>미달이지만 배포 허용</button>}
     {r.canCancelDeploy && <button onClick={() => void cancelDeploy(view)}>배포 취소</button>}
     {["COLLECTING", "LABELING", "DATASET"].includes(view.pipeline.stage) && <button onClick={() => void cancel(view)}>취소</button>}
     {r.active && <button className="danger" onClick={() => void stop(view)}>중단</button>}

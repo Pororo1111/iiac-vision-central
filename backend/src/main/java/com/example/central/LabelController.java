@@ -20,8 +20,16 @@ public class LabelController {
   public LabelController(LabelService service,LabelMapper db,CentralMapper devices) { this.service=service;this.db=db;this.devices=devices; }
   @GetMapping("/api/training/samples") public SamplePage samples(@RequestParam(defaultValue="0") @Min(0) @Max(100000) int page,
       @RequestParam(required=false) @Size(max=64) String deviceId,
+      @RequestParam(required=false) @Pattern(regexp="NEW|REVIEW|APPROVED|EXCLUDED|LABELED") String status,
+      @RequestParam(required=false) @Size(max=64) String cameraId,
+      @RequestParam(required=false) @Pattern(regexp="[1-9][0-9]{0,4}x[1-9][0-9]{0,4}") String size) {
+    Integer w=size==null?null:Integer.valueOf(size.substring(0,size.indexOf('x')));
+    Integer h=size==null?null:Integer.valueOf(size.substring(size.indexOf('x')+1));
+    return new SamplePage(db.samples(page*40,deviceId,status,cameraId,w,h),db.count(deviceId,status,cameraId,w,h),page,40);
+  }
+  @GetMapping("/api/training/samples/sizes") public List<SizeFacet> sizes(@RequestParam(required=false) @Size(max=64) String deviceId,
       @RequestParam(required=false) @Pattern(regexp="NEW|REVIEW|APPROVED|EXCLUDED|LABELED") String status) {
-    return new SamplePage(db.samples(page*40,deviceId,status),db.count(deviceId,status),page,40);
+    return db.sizes(deviceId,status);
   }
   @GetMapping("/api/training/stats") public Stats stats() { db.expire(); return db.stats(); }
   @GetMapping("/api/training/samples/{id}") public Sample sample(@PathVariable UUID id) { return service.sample(id.toString()); }

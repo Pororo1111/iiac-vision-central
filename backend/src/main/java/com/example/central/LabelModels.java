@@ -11,6 +11,7 @@ public final class LabelModels {
       String deviceId, String cameraId, OffsetDateTime capturedAt,
       String status, int revision, String proposal, String annotation, OffsetDateTime createdAt,
       String source, String importId) {}
+  public record SizeFacet(String deviceId,String cameraId,int width,int height,long count,OffsetDateTime firstAt,OffsetDateTime lastAt) {}
   public record SamplePage(List<Sample> items,long total,int page,int size) {}
   public record Stats(long total,long unprocessed,long pendingReview,long approved,long excluded,
       long queued,long running,OffsetDateTime lastReceivedAt,long autoQueued,long autoRunning,long labeled) {}

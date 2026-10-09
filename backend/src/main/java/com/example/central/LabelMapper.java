@@ -8,11 +8,19 @@ import org.apache.ibatis.annotations.*;
 public interface LabelMapper {
   String SAMPLE = "id::text,sha256,title,mime,width,height,device_id,camera_id,captured_at,status,revision,proposal::text,annotation::text,created_at,source,import_id::text";
   String JOB = "id::text,sample_id::text,sample_revision,instruction,model,status,lease_token::text,lease_until,error,created_at,finished_at,result::text,kind";
-  String FILTER = "<where><if test='device != null'>device_id=#{device}</if><if test='status != null'> AND status=#{status}</if></where>";
+  String FILTER = "<where><if test='device != null'>device_id=#{device}</if><if test='status != null'> AND status=#{status}</if>"
+      + "<if test='camera != null'> AND camera_id=#{camera}</if>"
+      + "<if test='width != null'> AND width=#{width} AND height=#{height}</if></where>";
   @Select("<script>SELECT " + SAMPLE + " FROM training_samples " + FILTER + " ORDER BY created_at DESC,id LIMIT 40 OFFSET #{offset}</script>")
-  List<Sample> samples(int offset,String device,String status);
+  List<Sample> samples(int offset,String device,String status,String camera,Integer width,Integer height);
   @Select("<script>SELECT count(*) FROM training_samples " + FILTER + "</script>")
-  long count(String device,String status);
+  long count(String device,String status,String camera,Integer width,Integer height);
+  /** 장치·카메라·이미지 크기별 수집 이미지 수. 같은 usb-0이라도 웹캠을 바꾸면 크기가 달라져 나눠 볼 수 있다. */
+  @Select("<script>SELECT device_id,camera_id,width,height,count(*) AS count,min(COALESCE(captured_at,created_at)) AS first_at,"
+      + "max(COALESCE(captured_at,created_at)) AS last_at FROM training_samples WHERE device_id IS NOT NULL"
+      + "<if test='device != null'> AND device_id=#{device}</if><if test='status != null'> AND status=#{status}</if>"
+      + " GROUP BY device_id,camera_id,width,height ORDER BY device_id,camera_id,last_at DESC LIMIT 100</script>")
+  List<SizeFacet> sizes(String device,String status);
   @Select("""
       SELECT count(*) AS total,count(*) FILTER (WHERE status='NEW') AS unprocessed,
       count(*) FILTER (WHERE status='REVIEW') AS pending_review,count(*) FILTER (WHERE status='APPROVED') AS approved,count(*) FILTER (WHERE status='LABELED') AS labeled,
