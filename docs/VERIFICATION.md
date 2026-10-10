@@ -199,3 +199,35 @@
 - `tests/pipelines.py` 7개 통과: ROBOFLOW 수집 방식, 기준 데이터셋 v27 거절·숨김, 실제 Gemma 이름 추천(예: `yolo26n_Robo_verify_v1`)을 포함한다.
 - 분할 함수는 묶음 20개 → 14/3/3, 5개 미만 → 전부 train으로 확인했다. 수집 이미지가 들어간 실제 학습 실행으로 현장 test 평가는 아직 확인하지 않았다(현재 수집 이미지 0장).
 - 휴대폰 폭에서 목록 글자가 잘리던 문제는 PC 표 칸 줄바꿈과 900px 이하 카드형 목록으로 바꿨다. 사용자 휴대폰 화면에서 다시 확인이 필요하다.
+
+## 2026-10-09: 오탐 판단 기억(Gemma + pgvector RAG, V37)
+
+테스트 백엔드 8211(같은 PostgreSQL 55432)·임시 프론트 8212로 확인했다. 운영 백엔드 8201은 학습 2f8d89a0 진행 중이라 재시작하지 않았다(V37은 공유 DB에 적용됨).
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| pgvector | Homebrew `pgvector` 0.8.7 설치 후 Flyway V37 | `CREATE EXTENSION vector`·`fp_memory`·HNSW 색인 생성 |
+| 기본 사례 | `scripts/seed-fp-memory.py` | 88건 저장·임베딩 약 7초, 다시 실행해도 origin으로 갱신만 |
+| API 계약 | `tests/fp_memory.py` 3개 | 승인 시 박스별 기억(false·real)·반려 미기억, 임베딩 채우기·잘못된 벡터·사진 400·없는 id 404, 판단별 검색·클래스 분리·k 범위 400, 완료 시 `method`·`match` 저장·잘못된 method 400, 근거 사진 미로그인 401 |
+| 회귀 | `tests/fp_checks.py` 5개 | 통과 |
+| 성과 | 평가 조끼 박스 26개(`docs/FP_MEMORY_RAG.md`) | `fp-v4` 15/26(남색 조끼 11개 모두 오탐 확정) → `fp-v5` 26/26(기억 25·RAG 1), 박스당 중앙값 10.7초 → 0.03초 |
+| 실제 사진 흐름 | 검증 장치로 원본 전송 → `fp_check.check` → 관리자 승인 → `fp_memory.fill_pending` | 베이지 셔츠 기억 오탐(0.92)·PENDING, 남색 조끼 기억 정탐·NOT_NEEDED, 승인 후 ADMIN 기억 임베딩 |
+| 화면 | Chrome(playwright-core)으로 `/video-search` 질문 → 카드 → 확인 창 → 승인 | 카드 "판단 기억 0.92", 확인 창 근거 사례 사진·유사도, 승인 후 "판단 기억에 넣었습니다" 안내. 정탐·오탐 버튼 줄바꿈 수정 |
+
+정리: 검증 장치·사진·데이터셋 파일·관리자 기억·확대 사진·검증 질문 대화 3건을 지웠고 `local:admin-fp` 수를 다시 맞췄다. 운영 observer(관리자 기억 임베딩)와 운영 백엔드 반영, Docker 이미지(`pgvector/pgvector:0.8.7-pg17`)는 검증하지 않았다.
+
+## 2026-10-10: 쓰러짐 탐지(포즈 규칙·FALL 이벤트·Gemma 2차 확인, V38)
+
+테스트 백엔드 8211(같은 PostgreSQL 55432)과 임시 프론트 8212로 확인했다. 운영 백엔드 8201은 학습 3e28f820 진행 중이라 재시작하지 않았다(V38은 공유 DB에 적용됨). 검증 데이터·수치·한계는 `docs/FALL_DETECTION.md`에 정리했다.
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| 규칙 단위 | `tests/test_fall_rules.py` 9개(합성 키포인트) | 빠른 전이 후 유지 시 확정, 짧은 누움·처음부터 누움·서 있다 사라진 뒤 누움·쪼그림 제외, 미검출·ID 변경 유지, 회복·소실 종료, 옆 사람 무관 |
+| 영상 규칙 | URFD 재구성 영상 12개, yolo26n/s-pose, hold 1.0 | 옆 시점 쓰러짐 5/5, ADL 오탐 0/5, 천장 시점 0/2(미지원). 10fps 같음, 5fps 3/5 |
+| Gemma | 규칙이 확정한 순간의 사진 1장(`segment-v6`) | 쓰러짐 5/5와 천장 2/2 `fallen=1`, ADL 0/5 |
+| API 계약 | `tests/fall_events.py` 3개 | FALL zoneId 생략·침입 zoneId 필수·재전송 중복·잘못된 유형 400, fallCheck 상태 4종, 알림 24시간·확인 CSRF 403·401·400·404·재확인 유지 |
+| 끝까지 | `scripts/simulate-fall-iot.py`로 8211에 영상 전송 | 쓰러짐 2건 15초 안에 CONFIRMED·대표 이미지, ADL 이벤트 없음, 쪼그린 사진 FALL_START는 NOT_CONFIRMED |
+| 화면 | Chrome(playwright)으로 통합 관제 | 빨간 알림(사진·AI 배지·요약·카메라 보기·확인 처리), 이벤트 표 유형·AI 배지·`카메라 전체`, 확인 처리 후 알림 2→1 |
+| 회귀 | integration, detection_snapshots, detections | 통과 |
+
+정리: 검증 장치·이벤트·확인 기록·원본 사진·대표 이미지를 지웠다. 실제 IoT 연동, 운영 백엔드 반영, Jetson 추론 속도는 검증하지 않았다.

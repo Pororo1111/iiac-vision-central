@@ -612,7 +612,7 @@ export default function VideoSearchPage() {
                             <div className="vsx-table-wrap">
                               <table className="vsx-table">
                                 <thead>
-                                  <tr><th>#</th><th>카메라</th><th>촬영</th><th>Gemma 판정</th></tr>
+                                  <tr><th>#</th><th>카메라</th><th>촬영</th><th>자동 판정</th></tr>
                                 </thead>
                                 <tbody>
                                   {q.reviews.slice(0, 10).map((r, i) => (

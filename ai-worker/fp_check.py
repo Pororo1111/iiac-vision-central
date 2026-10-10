@@ -6,13 +6,15 @@ Gemma는 판정(real·false·unsure)만 하고 데이터셋에는 쓰지 않는�
 observer.py가 질문·구간 분석이 없을 때 이 작업을 처리한다.
 """
 import json
+from pathlib import Path
 import time
 
 from PIL import Image, ImageDraw
 
+import fp_memory
 from worker import ROOT, api, encoded
 
-PROMPT = 'fp-v4'
+PROMPT = 'fp-v5'
 PPE = {'hard_hat': '안전모', 'safety_vest': '안전조끼'}
 # 사람이 확인한 현장 예시(scripts/build-fp-references.py). 글 설명만으로는 Gemma가 공항 남색 작업 조끼를 일반 재킷으로 보므로
 # 판정마다 같은 클래스의 예시를 함께 보여 준다(2026-10-07 검증).
@@ -65,13 +67,12 @@ def crop_region(cls, box, width, height):
     return (max(0, int(cx - half_w)), max(0, int(cy - half_h)), min(width, int(cx + half_w)), min(height, int(cy + half_h)))
 
 
-def views(image, obj):
+def views(image, obj, crop):
     """장면 전체(빨간 박스 표시)와 확대 이미지."""
     width, height = image.size
     context = image.copy()
     draw = ImageDraw.Draw(context)
     draw.rectangle(pixel_box(obj['box'], width, height), outline=(255, 0, 0), width=max(3, width // 200))
-    crop = image.crop(crop_region(obj['cls'], obj['box'], width, height))
     scale = 512 / max(crop.size)
     if scale > 1:
         crop = crop.resize((round(crop.width * scale), round(crop.height * scale)), Image.LANCZOS)
@@ -92,6 +93,31 @@ def references(cls):
     return text, [encoded(Image.open(REFERENCES / r['file']).convert('RGB')) for r in items]
 
 
+SOURCE = {'ADMIN': '관리자', 'CLAUDE': 'Claude'}
+LABEL = {'real': '정탐', 'false': '오탐'}
+
+
+def recalled(matches, cls):
+    """(설명, 이미지, 기억 사용 여부). 비슷한 판단 사례(정탐·오탐 각 2개까지)를 Gemma 예시로 붙인다(RAG). 사례가 없으면 고정 예시."""
+    picked = []
+    for label in ('real', 'false'):
+        picked += [m for m in matches if m['label'] == label][:2]
+    picked = [m for m in picked if Path(m['cropPath']).is_file()]
+    if not picked:
+        return (*references(cls), False)
+    lines = [f"{i + 3}번째 이미지: {SOURCE[m['source']]}가 '{LABEL[m['label']]}'으로 판단한 사례"
+             f"({PPE[cls]}{'가 맞음' if m['label'] == 'real' else '가 아님'}, 유사도 {m['similarity']:.2f})"
+             + (f" - {m['note']}" if m.get('note') else '') for i, m in enumerate(picked)]
+    text = ('\n3번째 이미지부터는 이 현장에서 사람이 판단한 비슷한 사례입니다(판정 대상 아님). '
+            '판정 대상이 어느 사례와 같은 종류인지 비교하세요.\n' + '\n'.join(lines))
+    return text, [encoded(Image.open(m['cropPath']).convert('RGB')) for m in picked], True
+
+
+def match_of(m, other):
+    return {'id': m['id'], 'source': m['source'], 'label': m['label'], 'similarity': round(m['similarity'], 4),
+            'opposite': round(other['similarity'], 4) if other else None}
+
+
 def ask(gemma, schema, system, instruction, images, attempt):
     response = gemma({
         'model': 'gemma4:12b', 'stream': False, 'think': False, 'format': schema,
@@ -101,13 +127,32 @@ def ask(gemma, schema, system, instruction, images, attempt):
 
 
 def judge(gemma, image, obj, attempt):
-    note, examples = references(obj['cls'])
-    images = views(image, obj) + examples
+    width, height = image.size
+    crop = image.crop(crop_region(obj['cls'], obj['box'], width, height))
+    # 1) 사람이 판단한 비슷한 사례가 뚜렷하면 그 판단을 따른다(Gemma 호출 없음).
+    matches = []
+    try:
+        matches = fp_memory.search(obj['cls'], fp_memory.embed(crop))
+    except Exception as exc:
+        print('오탐 판단 기억 검색 실패, 고정 예시로 판정:', type(exc).__name__, str(exc)[:100], flush=True)
+    decision = fp_memory.decide(matches)
+    if decision:
+        label, top, other = decision
+        return {'index': obj['index'], 'verdict': label, 'method': 'memory', 'match': match_of(top, other),
+                'seen': f"{SOURCE[top['source']]} 판단 사례와 비슷함"[:100],
+                'reason': (f"{SOURCE[top['source']]}가 {LABEL[top['label']]}으로 판단한 사례와 유사도 {top['similarity']:.2f}"
+                           + (f", {LABEL[other['label']]} 사례 최고 {other['similarity']:.2f}" if other else '')
+                           + (f" ({top['note']})" if top.get('note') else ''))[:300]}
+    # 2) 애매하면 비슷한 사례를 예시로 붙여 Gemma가 판정한다.
+    note, examples, used = recalled(matches, obj['cls'])
+    method = 'rag' if used else 'gemma'
+    images = views(image, obj, crop) + examples
     result = ask(gemma, SCHEMA, SYSTEM, f"빨간 박스를 탐지 모델이 '{PPE[obj['cls']]}'(신뢰도 {obj['score']:.2f})로 판단했습니다. "
                  f"실제로 {PPE[obj['cls']]}입니까?" + note, images, attempt)
     if result.get('verdict') not in ('real', 'false', 'unsure'):
         raise ValueError('판정 값 오류')
-    verdict = {'index': obj['index'], 'verdict': result['verdict'],
+    verdict = {'index': obj['index'], 'verdict': result['verdict'], 'method': method,
+               **({'match': match_of(matches[0], None)} if used else {}),
                'seen': str(result.get('seen', ''))[:100], 'reason': str(result.get('reason', ''))[:300]}
     if verdict['verdict'] == 'false':
         system = '이미지를 보고 질문에 yes·no·unsure로 답하고 근거를 한 문장으로 쓰세요. 확신이 없으면 unsure입니다.'
@@ -135,7 +180,7 @@ def check(job, gemma, OllamaDown):
                                                       'elapsedMs': int((time.monotonic() - began) * 1000)})
         review = any(v['verdict'] != 'real' for v in verdicts)
         print('오탐 확인 완료', job['id'], job['cameraId'], job['at'],
-              ' '.join(f"{o['cls']}={v['verdict']}({v['seen']})" for o, v in zip(targets, verdicts)),
+              ' '.join(f"{o['cls']}={v['verdict']}[{v['method']}]({v['seen']})" for o, v in zip(targets, verdicts)),
               '→ 관리자 확인 대기' if review else '', f'{time.monotonic() - began:.1f}s', flush=True)
     except OllamaDown as exc:
         print('오탐 확인: 분석 모델 연결 실패, 대기열로 되돌림', job['id'], str(exc), flush=True)

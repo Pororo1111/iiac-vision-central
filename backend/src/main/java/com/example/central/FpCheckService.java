@@ -29,13 +29,14 @@ public class FpCheckService {
   static final List<String> CLASSES=List.of("person","safety_vest","traffic_cone","hard_hat");
   static final String DATASET_URL="local:admin-fp",DATASET_NAME="admin-fp";
   final FpCheckMapper db;
+  final FpMemoryService memory;
   final DetectionService detections;
   final ObjectMapper json;
   final Path dataset;
 
-  public FpCheckService(FpCheckMapper db,DetectionService detections,ObjectMapper json,
+  public FpCheckService(FpCheckMapper db,FpMemoryService memory,DetectionService detections,ObjectMapper json,
       @Value("${app.review.dataset-root:${app.media-root:/app/data}/admin-fp}") String dataset) {
-    this.db=db;this.detections=detections;this.json=json;
+    this.db=db;this.memory=memory;this.detections=detections;this.json=json;
     this.dataset=Path.of(dataset).toAbsolutePath().normalize();
   }
   static ResponseStatusException error(HttpStatus status,String code) { return new ResponseStatusException(status,code); }
@@ -66,8 +67,12 @@ public class FpCheckService {
   // ---- 워커 ----
   public record Job(String id,String leaseToken,int attempt,String batchId,OffsetDateTime at,String deviceId,String cameraId,
       String path,int width,int height,List<Obj> objects) {}
+  /** 판정 근거(V37): gemma(고정 예시), memory(사람이 판단한 비슷한 사례로 바로 결정), rag(비슷한 사례를 예시로 붙여 Gemma 판정). */
+  public record MemoryMatch(@NotBlank @Size(max=36) String id,@NotBlank @Pattern(regexp="CLAUDE|ADMIN") String source,
+      @NotBlank @Pattern(regexp="real|false") String label,@NotNull Double similarity,Double opposite) {}
   public record Verdict(@NotNull @Min(0) @Max(99) Integer index,@NotBlank @Pattern(regexp="real|false|unsure") String verdict,
-      @NotNull @Size(max=100) String seen,@NotNull @Size(max=300) String reason) {}
+      @NotNull @Size(max=100) String seen,@NotNull @Size(max=300) String reason,@Pattern(regexp="gemma|memory|rag") String method,
+      @Valid MemoryMatch match) {}
   public record Completion(@NotBlank String leaseToken,@NotNull @Size(max=100) List<@Valid Verdict> verdicts,
       @NotBlank @Size(max=64) String model,@NotBlank @Size(max=32) String promptVersion,Integer elapsedMs) {}
   public record Failure(@NotBlank String leaseToken,@NotBlank @Size(max=500) String error) {}
@@ -101,6 +106,8 @@ public class FpCheckService {
       var row=new LinkedHashMap<String,Object>();
       row.put("index",v.index());row.put("cls",o.cls());row.put("score",o.score());row.put("box",o.box());
       row.put("verdict",v.verdict());row.put("seen",v.seen());row.put("reason",v.reason());
+      if(v.method()!=null) row.put("method",v.method());
+      if(v.match()!=null) row.put("match",v.match());
       stored.add(row);
       if(v.verdict().equals("false")) falses++;
       if(v.verdict().equals("unsure")) unsure++;
@@ -121,7 +128,7 @@ public class FpCheckService {
   static final Set<String> REVIEWS=Set.of("NOT_NEEDED","PENDING","APPROVED","REJECTED");
   public record DatasetInfo(String url,int train,int val,int boxes) {}
   public record ItemView(Item item,String imagePath) {}
-  public record View(Summary summary,DatasetInfo dataset,List<ItemView> items) {}
+  public record View(Summary summary,DatasetInfo dataset,FpMemoryMapper.Counts memory,List<ItemView> items) {}
   ItemView view(Item i) { return new ItemView(i,"/api/training/fp-checks/"+i.id()+"/image"); }
   DatasetInfo datasetInfo() {
     var c=db.datasetCounts();
@@ -133,7 +140,7 @@ public class FpCheckService {
     return db.list(review,deviceId,cameraId,from==null?null:utc(from),to==null?null:utc(to),limit).stream().map(this::view).toList();
   }
   public View recent(String review,int limit) {
-    return new View(db.summary(),datasetInfo(),list(review,null,null,null,null,limit));
+    return new View(db.summary(),datasetInfo(),memory.counts(),list(review,null,null,null,null,limit));
   }
   public record Detail(Item item,String imagePath,int width,int height,List<Obj> objects) {}
   public Detail detail(UUID id) {
@@ -186,6 +193,8 @@ public class FpCheckService {
     try {
       if(db.review(id.toString(),"APPROVED",json.writeValueAsString(removed),user,name,split,lines.size())!=1)
         throw error(HttpStatus.CONFLICT,"REVIEW_NOT_PENDING");
+      // 관리자 판단은 다음 오탐 확인의 비교 사례가 된다(V37). 임베딩은 워커가 곧바로 채운다.
+      memory.remember(id.toString(),objects,removed,user);
       syncDataset();
     } catch(RuntimeException e) {
       Files.deleteIfExists(image);Files.deleteIfExists(label);

@@ -15,7 +15,7 @@
 | Spring Boot | 4.0.8 / REST API |
 | Spring Security | Spring Boot 관리 버전 / 세션·장치 인증 |
 | MyBatis Starter | 4.0.1 / SQL·매핑 |
-| PostgreSQL | 17.9 / 영구 저장 |
+| PostgreSQL · pgvector | 17 · 0.8.7 / 영구 저장 · 오탐 판단 기억 유사도 검색 |
 | Flyway | Spring Boot 관리 버전 / migration |
 | Next.js · React | 16.3.5 · 19.3.0 / 관리자 화면 |
 | Node.js | 22.22.1 / 프론트엔드 빌드·실행 |
@@ -33,12 +33,14 @@ AI 워커·학습·영상 분석은 프로젝트 `.venv`(Python 3.12, `ai-worker
 ## 로컬 개발 실행 (Docker 사용 안 함)
 
 ```sh
-brew install openjdk@21 postgresql@17 node@22 gradle
+brew install openjdk@21 postgresql@17 pgvector node@22 gradle
 python3 scripts/init-env.py
 python3 scripts/init-ai-env.py
 PATH=/opt/homebrew/opt/node@22/bin:$PATH npm ci --prefix frontend
 python3 scripts/install-mediamtx.py
 python3 scripts/dev.py start
+# 오탐 판단 기억에 Claude 판별 기본 사례(88건) 넣기(처음 한 번, 다시 실행해도 중복 없음)
+.venv/bin/python scripts/seed-fp-memory.py
 # 상태 / 종료
 python3 scripts/dev.py status
 python3 scripts/dev.py stop

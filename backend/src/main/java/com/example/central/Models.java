@@ -122,6 +122,12 @@ public final class Models {
       String query,
       String userAgent) {}
 
+  public static final String EVENT_TYPES = "INTRUSION_START|INTRUSION_END|FALL_START|FALL_END";
+
+  /**
+   * fallCheck는 FALL_START에만 있다: 같은 UUID 탐지 배치의 Gemma 장면 판정으로 PENDING(원본 대기·분석 중),
+   * CONFIRMED(fallen&gt;0), NOT_CONFIRMED(fallen=0), UNAVAILABLE(생략·실패). acked*는 관리자 확인 기록.
+   */
   public record Event(
       String eventId,
       String deviceId,
@@ -130,7 +136,13 @@ public final class Models {
       String type,
       OffsetDateTime occurredAt,
       OffsetDateTime receivedAt,
-      int objectCount) {}
+      int objectCount,
+      String fallCheck,
+      Integer fallen,
+      String checkSummary,
+      boolean hasThumbnail,
+      OffsetDateTime ackedAt,
+      String ackedBy) {}
 
   public record Registration(
       @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
@@ -155,8 +167,9 @@ public final class Models {
       @NotNull UUID eventId,
       @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
       @NotBlank @Size(max = 64) String cameraId,
-      @NotBlank @Size(max = 64) String zoneId,
-      @NotBlank @Pattern(regexp = "INTRUSION_START|INTRUSION_END") String type,
+      /** 침입은 필수. 쓰러짐(FALL_*)은 카메라 전체 판정이라 생략하면 빈 문자열로 저장한다. */
+      @Size(max = 64) String zoneId,
+      @NotBlank @Pattern(regexp = EVENT_TYPES) String type,
       @NotNull OffsetDateTime occurredAt,
       @NotNull @Min(0) @Max(1000000) Integer objectCount) {}
 

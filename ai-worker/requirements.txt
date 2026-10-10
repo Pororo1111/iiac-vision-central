@@ -10,3 +10,5 @@ PyYAML==6.0.3
 lap==0.5.13
 roboflow==1.4.0
 yt-dlp==2026.8.19
+# 오탐 판단 기억(V37) 이미지 임베딩. 가중치 ViT-B-16 laion2b_s34b_b88k는 첫 실행 때 .artifacts/ai-assets/embeddings에 받는다.
+open_clip_torch==3.3.0

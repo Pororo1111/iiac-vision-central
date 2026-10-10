@@ -37,6 +37,7 @@ public interface ObservationMapper {
   /**
    * 가져갈 수 있는 구간: 기다리던 원본 프레임이 모두 왔거나, 기다림이 끝났고(또는 기다리지 않고) 원본 프레임이나
    * 구간 시작을 포함한 녹화가 있을 때. 둘 다 없으면 녹화가 등록될 때까지 기다린다.
+   * 쓰러짐(FALL_START와 같은 UUID 배치)은 Gemma 2차 확인을 위해 먼저 가져간다(V38).
    */
   @Select(value="""
       UPDATE observations SET status='RUNNING',attempts=attempts+1,lease_token=#{token}::uuid,lease_until=now()+interval '120 seconds'
@@ -46,7 +47,8 @@ public interface ObservationMapper {
             EXISTS(SELECT 1 FROM detection_snapshots s WHERE s.batch_id=o.batch_id)
             OR EXISTS(SELECT 1 FROM recordings r WHERE r.device_id=o.device_id AND r.camera_id=o.camera_id
               AND r.started_at<=o.started_at AND r.ended_at>o.started_at))))
-        ORDER BY o.created_at,o.batch_id FOR UPDATE SKIP LOCKED LIMIT 1)
+        ORDER BY EXISTS(SELECT 1 FROM events e WHERE e.event_id=o.batch_id AND e.type='FALL_START') DESC,
+          o.created_at,o.batch_id FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING batch_id::text,device_id,camera_id,started_at,ended_at,lease_token::text,attempts""",affectData=true)
   Claimed claim(String token);
 

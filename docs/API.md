@@ -86,6 +86,30 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 - 동일 UUID 재전송도 200이며 `duplicate:true`. **같은 UUID의 내용을 갱신하지 않습니다.** 발신자는 최초 payload를 유지해야 합니다.
 - 다른 장치가 사용한 UUID이면 409. 이벤트 수신은 heartbeat를 대체하지 않습니다.
 
+### 쓰러짐 이벤트 (2026-10-10, V38)
+
+현장 장치가 포즈 모델과 규칙으로 쓰러짐을 판정한다. 규칙과 검증은 `docs/FALL_DETECTION.md`, 참고 구현은 `scripts/fall_rules.py`에 있다.
+
+- 유형 `FALL_START`(쓰러짐 확정)·`FALL_END`(일어남 또는 사라짐)를 추가했다. 쓰러짐은 카메라 전체 판정이므로 `zoneId`를 생략할 수 있다. 생략하거나 공백이면 빈 문자열로 저장한다. 침입 유형은 여전히 zoneId가 필수이며, 없으면 400 `INVALID_REQUEST`다. `objectCount`는 쓰러진 사람 수다.
+- 원본 사진 연결: `FALL_START`의 `eventId`와 **같은 UUID를 batchId로** 써서 프레임 1개짜리 탐지 배치(`POST /api/iot/detections`, `startedAt=at`, `endedAt=at+1ms`, 사람 박스 포함)를 보낸다. 이어서 같은 batchId·`at`으로 오버레이 없는 원본 1장(`POST /api/iot/detection-snapshots`)을 보낸다. 순서는 이벤트 → 배치 → 원본이며, 배치와 원본의 재시도 규칙은 탐지 원본 프레임 절을 따른다.
+- 중앙은 이 구간을 다른 구간보다 먼저 Gemma 장면 판정(`segment-v6`, `fallen` 집계)에 넣는다. 판정 결과가 이벤트의 2차 확인이 된다.
+- `FALL_END`는 시작 이벤트와 연결하지 않는다. 같은 장치·카메라·시각으로 맞춰 본다.
+
+관리 API(관리자 세션, 쓰기는 CSRF):
+
+| API | 동작 |
+|---|---|
+| `GET /api/events` | 각 항목에 아래 필드를 더했다. `type` 필터에 `FALL_START`·`FALL_END`를 쓸 수 있다 |
+| `GET /api/alerts/falls` | 관리자가 확인하지 않은 최근 24시간 `FALL_START` 배열(최신순, 최대 20건). 항목 형식은 이벤트와 같다 |
+| `POST /api/events/{eventId}/ack` | 쓰러짐 알림 확인. 성공하면 200과 갱신된 이벤트를 돌려준다. 다시 확인해도 첫 기록을 유지한다. 쓰러짐이 아닌 이벤트는 400 `NOT_FALL_EVENT`, 없는 이벤트는 404 `EVENT_NOT_FOUND`, UUID 형식 오류는 400, CSRF가 없으면 403 |
+
+| 이벤트 필드 | 의미 |
+|---|---|
+| `fallCheck` | `FALL_START`만 값이 있다(나머지는 null). `PENDING`(배치·원본 대기 또는 분석 중), `CONFIRMED`(Gemma `fallen>0`), `NOT_CONFIRMED`(분석은 끝났지만 쓰러진 사람 없음, 오경보 가능), `UNAVAILABLE`(어두움 등으로 생략되었거나 실패) |
+| `fallen`·`checkSummary` | Gemma 쓰러짐 수와 장면 요약(`FALL_START`만) |
+| `hasThumbnail` | 대표 이미지 여부. 이미지는 `GET /api/observations/{eventId}/thumbnail`로 받는다 |
+| `ackedAt`·`ackedBy` | 관리자 확인 시각과 계정(없으면 null) |
+
 ## 관리 조회
 
 관리자 세션이 필요합니다. 응답에 토큰·비밀번호 해시가 포함되지 않습니다.
@@ -95,7 +119,7 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 - `GET /api/devices/{deviceId}/cameras/{cameraId}/sources`: 아래 카메라 원본 절. 없는 카메라 404.
 - `POST /api/devices/{deviceId}/cameras/{cameraId}/view-session`: 관리자 세션+CSRF 필요. 정확한 카메라 경로만 읽을 수 있는 5분짜리 토큰과 WHEP URL 반환.
 - `GET /api/events`: `{items: [...], total, page, size}`.
-- 선택 필터: `deviceId`, `type`, `from`, `to` (발생 시각 기준, 양 끝 포함).
+- 선택 필터: `deviceId`, `type`, `from`, `to` (발생 시각 기준, 양 끝 포함). `type`은 `INTRUSION_START`·`INTRUSION_END`·`FALL_START`·`FALL_END`.
 - `page`는 0부터(최대 1,000,000), `size`는 1~100(기본 20).
 - 이벤트는 `occurredAt DESC, eventId DESC` 고정 정렬. 각 항목은 입력 필드와 중앙 생성 `receivedAt`을 포함합니다.
 - `GET /api/health`: 익명 200 `{"status":"UP"}`. API 프로세스 생존 확인용이며 DB 실시간 진단용은 아닙니다.
@@ -299,7 +323,7 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 장치 Bearer 인증을 사용한다. 다른 장치 요청은 404로 차단한다. 장치가 요청하기 전에는 모델을 전송하지 않는다. 배포 알림은 heartbeat 응답으로 전달한다(중앙이 IoT로 접속하지 않음).
 
 - heartbeat 응답의 `deployment`: 이 장치의 미완료 배포(PENDING~APPLYING)가 있으면 아래 desired와 같은 객체, 없거나 취소·종료되면 null. IoT는 별도 CLI 실행 없이 이 값을 보고 배포를 시작·재개한다. 같은 id가 계속 오면 진행 중인 작업을 이어가며 중복 실행하지 않는다.
-- `GET /api/iot/deployments/desired`: 미할당이면 204. 할당 시 `{id, modelId, modelName, deviceId, status, sha256, sizeBytes, format:"pt", classes:["person","safety_vest","traffic_cone","hard_hat"], downloadPath}`. `modelName`(2026-09-28 추가)은 모델 현황판과 같은 표시 이름(기본 모델 라벨 → 파이프라인 이름 → 학습 실행 이름, 최대 200자)이며 이름이 없으면 modelId와 같다. IoT는 적용 완료 후 이 값을 heartbeat `modelName`으로 보고한다. 이 필드를 모르는 IoT는 무시해도 된다.
+- `GET /api/iot/deployments/desired`: 미할당이면 204. 할당 시 `{id, modelId, modelName, deviceId, status, sha256, sizeBytes, format:"pt", classes:["person","safety_vest","traffic_cone","hard_hat"], downloadPath}`. `classes`(2026-10-09 변경)는 후보 모델의 실제 클래스 표다. 이전 후보는 4클래스, 이후 학습한 후보는 `["person","safety_vest","traffic_cone","hard_hat","signal_tower","smart_cone"]`(중앙신호등·스마트 콘 추가, 앞 4개 번호 유지)다. IoT는 내려받은 모델의 `names`가 이 표와 같은지 확인한다. `modelName`(2026-09-28 추가)은 모델 현황판과 같은 표시 이름(기본 모델 라벨 → 파이프라인 이름 → 학습 실행 이름, 최대 200자)이며 이름이 없으면 modelId와 같다. IoT는 적용 완료 후 이 값을 heartbeat `modelName`으로 보고한다. 이 필드를 모르는 IoT는 무시해도 된다.
 - `GET /api/iot/deployments/{id}/model`: 지정 장치의 미완료 배포 파일. 최대 512 MiB, octet-stream, Content-Length, no-store. 서버에서도 파일 해시를 다시 검사한다.
 - `POST /api/iot/deployments/{id}/status`: `{status, activeSha256, message}`. message 최대 500자. 활성 해시는 null 또는 소문자 64자리 SHA-256. 성공 `{accepted:true}`.
 
@@ -582,6 +606,24 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 - 승인 데이터셋: `REVIEW_DATASET_ROOT`(dev.py는 `.artifacts/ai-assets/datasets/admin-fp`, 기본 `MEDIA_ROOT/admin-fp`)에 `admin_fp_{batchId}_{at 마이크로초}.jpg`와 라벨을 쓴다. 첫 승인은 val, 이후 이름 해시로 약 10%가 val이다. train·val이 모두 생기면 외부 데이터셋 `local:admin-fp`(화면 이름 "관리자 승인 오탐 보강")로 등록되고 이후 승인마다 수가 갱신된다. 승인 기록이 사라진 파일은 1시간마다 지운다.
 - 제외 카메라: `REVIEW_EXCLUDE_CAMERAS`(기본 `test-video*`). 테스트 영상은 기준·외부 데이터셋 이미지로 만들어 학습에 넣으면 평가가 오염되므로 확인 대상에 넣지 않는다.
 - Gemma 판정(`fp-v4`): 장면(빨간 박스)·확대 이미지와 사람이 확인한 현장 예시(`scripts/build-fp-references.py` → `.artifacts/ai-assets/fp-references/`)를 함께 본다. 오탐 판정은 YOLO 판단을 알려 주지 않은 두 번째 질문(조끼는 반사띠·형광색·덧입은 조끼 여부)이 모두 '아니오'일 때만 확정하고, 엇갈리면 애매다.
+
+### 오탐 판단 기억(RAG, 2026-10-09, V37)
+
+사람이 정탐·오탐을 판단한 보호구 박스를 CLIP 이미지 임베딩(open_clip `ViT-B-16`·`laion2b_s34b_b88k`, 512차원, 정규화)으로 `fp_memory`에 저장하고(pgvector `vector(512)`, HNSW 코사인 색인), 오탐 확인 때 같은 클래스의 비슷한 사례를 찾는다. 임베딩·확대 사진은 호스트 워커(`ai-worker/fp_memory.py`)가 만들고 중앙은 저장·검색만 한다. 확대 영역은 Gemma가 보는 확대 사진과 같다(`fp_check.crop_region`).
+
+| API | 인증 | 동작 |
+|---|---|---|
+| GET `/internal/ai/fp-memory/pending` | 워커 Bearer | 임베딩이 빈 관리자 판단(최대 20) `[{id, cls, box, imagePath}]` |
+| POST `/internal/ai/fp-memory/{id}/embedding` | 워커 Bearer | `{vector:[512], model, crop: JPEG base64(최대 2MB)}`. 차원·값·사진 오류 400(`INVALID_VECTOR`·`INVALID_CROP`), 없는 id 404 |
+| POST `/internal/ai/fp-memory/seed` | 워커 Bearer | Claude 기본 사례 `{origin, cls: hard_hat\|safety_vest, label: real\|false, box, note, vector, model, crop}` → `{id}`. 같은 `origin`은 갱신 |
+| POST `/internal/ai/fp-memory/search` | 워커 Bearer | `{cls, vector, k(1~20, 기본 8)}` → 정탐·오탐 판단마다 가장 비슷한 k개를 합친 `[{id, source, label, similarity, note, createdBy, cropPath}]`(유사도 높은 순) |
+| GET `/api/training/fp-memory/{id}/image` | 관리자 | 사례 확대 사진 JPEG(판정 근거 표시) |
+
+- 출처: `CLAUDE`(`scripts/seed-fp-memory.py`, 10/07·10/08 웹캠을 Claude가 판별한 88건: 안전모 오탐 대머리 13, 조끼 오탐 베이지 셔츠 52, 조끼 정탐 남색 작업 조끼 23), `ADMIN`(관리자 승인 시 보호구 박스마다 생성. 오탐으로 뺀 박스 `false`, 남긴 박스 `real`. 반려는 기억하지 않는다). 관리자 기억은 원본 오탐 확인 행이 지워지면 함께 지워지고, 확대 사진(`MEDIA_ROOT/fp-memory/{id}.jpg`)은 1시간마다 정리한다.
+- observer는 매 반복 처음에 빈 임베딩을 채운다(박스당 0.1초 안팎). 승인한 판단은 바로 다음 오탐 확인부터 쓰인다.
+- 판정 `fp-v5`: ① 박스 확대 사진을 임베딩해 정탐·오탐 사례를 찾고, 두 판단의 최고 유사도 차이가 0.03 이상이면 더 비슷한 쪽 판단을 따른다(`method: memory`, Gemma 호출 없음). 한쪽 사례만 있으면 유사도 0.9 이상일 때만 따른다. ② 아니면 비슷한 사례(판단별 최대 2개)를 고정 예시 대신 붙여 Gemma가 판정한다(`method: rag`, 오탐 재확인 규칙은 `fp-v4`와 같다). ③ 기억 검색이 실패하거나 사례가 없으면 고정 예시로 판정한다(`method: gemma`).
+- 완료 `verdicts[]`에 선택 필드 `method`(`gemma`\|`memory`\|`rag`)와 `match:{id, source, label, similarity, opposite}`(근거 사례·반대 판단 최고 유사도)를 그대로 저장한다. `GET /api/training/fp-checks`는 `memory:{claude, admin, pending, real, falses}` 수를 함께 준다.
+- 기억 판정은 데이터셋에 넣지 않는다. 오탐이면 여전히 관리자 확인(`PENDING`)이며, 데이터셋은 관리자 승인으로만 쌓인다. 근거와 성과는 `docs/FP_MEMORY_RAG.md`.
 
 ### 영상 검색 대화 연결
 

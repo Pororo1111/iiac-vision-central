@@ -74,7 +74,23 @@ public class DeploymentService {
     // IoT가 적용 후 heartbeat modelName으로 보고할 표시 이름. 이름이 없으면 modelId를 쓴다.
     return Map.ofEntries(Map.entry("id",deployment.id()),Map.entry("modelId",model.id()),Map.entry("modelName",name==null||name.isBlank()?model.id():name),
         Map.entry("deviceId",deployment.deviceId()),Map.entry("status",deployment.status()),Map.entry("sha256",model.sha256()),Map.entry("sizeBytes",model.sizeBytes()),
-        Map.entry("format","pt"),Map.entry("classes",List.of("person","safety_vest","traffic_cone","hard_hat")),Map.entry("downloadPath","/api/iot/deployments/"+deployment.id()+"/model"));
+        Map.entry("format","pt"),Map.entry("classes",classes(model.id())),Map.entry("downloadPath","/api/iot/deployments/"+deployment.id()+"/model"));
+  }
+  /** 배포 정보에 보낼 후보 모델의 클래스 표. IoT는 이 표와 내려받은 모델의 클래스가 같은지 확인한다. */
+  List<String> classes(String model) {
+    try {return List.of(json.readValue(db.classes(model),String[].class));}
+    catch(Exception e) {throw new IllegalStateException("MODEL_CLASSES_INVALID",e);}
+  }
+  /** 학습 결과 model.json의 classes(6클래스 등). 기록이 없는 이전 실행은 null이며 DB 기본값(4클래스)을 쓴다. */
+  String runClasses(String id) throws Exception {
+    if(root==null) return null;
+    Path meta=root.resolve(UUID.fromString(id).toString()).resolve("model.json");
+    if(!Files.isRegularFile(meta)) return null;
+    var node=json.readTree(Files.readString(meta)).path("classes");
+    if(!node.isArray()) return null;
+    TrainingService.require(node.size()>=1 && node.size()<=32,"MODEL_CLASSES_INVALID");
+    for(var c:node) TrainingService.require(c.isTextual() && c.asText().matches("[a-z_]{1,32}"),"MODEL_CLASSES_INVALID");
+    return json.writeValueAsString(node);
   }
   static String hash(Path path) throws Exception {
     var digest=MessageDigest.getInstance("SHA-256");
@@ -97,7 +113,7 @@ public class DeploymentService {
     TrainingService.require(size>0 && size<=536870912L && hash.equals(summary.path("modelSha256").asText()),"MODEL_HASH_MISMATCH");
     if(!eligible && training.released(id)==0)
       training.note(id,json.writeValueAsString(Map.of("releaseOverride",Map.of("by",overrideBy,"at",java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).toString()))));
-    db.register(id,hash,size);var model=db.model(id);
+    db.register(id,hash,size);String classes=runClasses(id);if(classes!=null) db.setClasses(id,classes);var model=db.model(id);
     TrainingService.require(model.sha256().equals(hash) && model.sizeBytes()==size,"MODEL_VERSION_IMMUTABLE");return model;
   }
   /** 워커는 평가 통과 실행만 release/model.pt로 복사하므로, 관리자 허용 등록 때 학습 결과(model.json weights)를 해시 확인 후 복사한다. */

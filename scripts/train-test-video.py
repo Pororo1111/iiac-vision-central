@@ -26,8 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 IOT = ROOT.parent / "iot-server"
 RUNS = ROOT / ".artifacts/training-runs"
 sys.path.insert(0, str(ROOT / "scripts"))
-from ai_assets import BASE_MODEL, BASELINE, PRETRAINED  # noqa: E402
-CLASSES = ["person", "safety_vest", "traffic_cone", "hard_hat"]
+from ai_assets import BASE_MODEL, BASELINE, CLASSES, PRETRAINED, compatible  # noqa: E402
 PROGRESS = None
 PROGRESS_RUN = None
 PROGRESS_LOCK = threading.Lock()
@@ -307,10 +306,52 @@ def base_weights(run: Path) -> Path:
     return path
 
 
+def expand_classes(base: Path, output: Path) -> Path:
+    """앞부분 클래스만 아는 현장 모델(4클래스 등)을 CLASSES 수의 분류 출력으로 넓힌 체크포인트를 만든다.
+
+    ultralytics는 클래스 수가 다르면 분류 출력층을 새로 만들어 기존 클래스 판단까지 처음부터 다시 배운다.
+    분류 출력(cv3·one2one_cv3 마지막 층)의 기존 클래스 행은 그대로 옮기고 새 클래스 행만 초기값으로 둔다.
+    YOLO26 상자 출력(cv2)은 reg_max=1이라 채널 수가 4로 같을 수 있으므로 이름으로 분류 출력만 고른다.
+    이미 CLASSES와 같거나 호환되지 않는(사전학습 COCO) 모델은 그대로 돌려준다.
+    """
+    import torch
+    from ultralytics.nn.tasks import DetectionModel
+    checkpoint = torch.load(str(base), map_location="cpu", weights_only=False)
+    old = (checkpoint.get("ema") or checkpoint["model"]).float()
+    names = [old.names[i] for i in range(len(old.names))]
+    if names == CLASSES or not compatible(names):
+        return base
+    new = DetectionModel(dict(old.yaml), nc=len(CLASSES), verbose=False)
+    state, copied = new.state_dict(), 0
+    for key, value in old.state_dict().items():
+        target = state.get(key)
+        if target is None:
+            raise RuntimeError("클래스 확장 중 모델 구조가 다릅니다: " + key)
+        if target.shape == value.shape:
+            state[key] = value
+        elif "cv3." in key and value.shape[0] == len(names) and target.shape[1:] == value.shape[1:]:
+            target[:len(names)] = value
+            copied += 1
+        else:
+            raise RuntimeError("클래스 확장 중 모델 구조가 다릅니다: " + key)
+    if not copied:
+        raise RuntimeError("분류 출력층을 찾지 못했습니다.")
+    new.load_state_dict(state)
+    new.names, new.args = dict(enumerate(CLASSES)), getattr(old, "args", {})
+    path = output / "base-expanded.pt"
+    torch.save({**checkpoint, "model": new.half(), "ema": None, "optimizer": None, "updates": None, "epoch": -1,
+                "best_fitness": None}, path)
+    return path
+
+
 # 외부 데이터가 기준 자료를 덮지 않도록 split별 상한을 둔다. train·val은 기준 자료 수 이하, 전체는 EXTERNAL_LIMIT 이하다.
 EXTERNAL_LIMIT = 3000
 EXTERNAL_TEST_LIMIT = 200
 BATCH = 16
+# 기준 자료에 없는 새 클래스(중앙신호등·스마트 콘)는 보강 사진이 수십 장뿐이라 수천 장 사이에서 거의 학습되지 않는다.
+# 검토한 local: 데이터셋의 train 이미지 중 새 클래스 박스가 있는 사진을 이 배수만큼 복사해 넣는다(val은 복사하지 않는다).
+NEW_CLASS_REPEAT = 10
+BASE_CLASS_COUNT = 4
 
 
 EXTERNAL_LABELS = ROOT / ".artifacts/external-labels"
@@ -342,7 +383,7 @@ def external_labels(item: dict, device: str, threshold: float) -> tuple[dict, bo
         return json.loads(cache.read_text(encoding="utf-8")), True
     from ultralytics import YOLO
     model = YOLO(str(BASE_MODEL))
-    if [model.names[i] for i in range(len(model.names))] != CLASSES:
+    if not compatible(model.names[i] for i in range(len(model.names))):
         raise ValueError("기준 모델 클래스 표가 일치하지 않습니다.")
     labeled = {t for t in mapping if t is not None}
     items, excluded = [], {}
@@ -411,8 +452,13 @@ def add_external(run: Path, add, counts: dict, baseline: dict, threshold: float,
         if item.get("reviewed"):
             for _, entry, split in entries:
                 image = Path(entry["path"])
-                add(image, Path(), split, f"rf_{str(item['id'])[:8]}_{image.name}", "\n".join(entry["labels"]) + ("\n" if entry["labels"] else ""))
+                content = "\n".join(entry["labels"]) + ("\n" if entry["labels"] else "")
+                add(image, Path(), split, f"rf_{str(item['id'])[:8]}_{image.name}", content)
                 counts["external"][item["name"]] += 1
+                if split == "train" and any(int(line.split()[0]) >= BASE_CLASS_COUNT for line in entry["labels"]):
+                    for copy in range(1, NEW_CLASS_REPEAT):
+                        add(image, Path(), split, f"rf_{str(item['id'])[:8]}_{image.stem}_r{copy}{image.suffix}", content)
+                        counts["newClassRepeated"] = counts.get("newClassRepeated", 0) + 1
             continue
         candidates += entries
     limits = {"train": min(EXTERNAL_LIMIT, baseline["train"]), "val": baseline["val"], "ext_test": EXTERNAL_TEST_LIMIT}
@@ -487,7 +533,7 @@ def combined_dataset(run: Path, review: dict, baseline_limit: int | None, device
     if output.exists():
         raise RuntimeError("기존 조합 데이터셋이 있습니다. 이전 학습 결과를 보존하기 위해 덮어쓰지 않습니다.")
     source = yaml.safe_load(BASELINE.read_text(encoding="utf-8"))
-    if source.get("names") != CLASSES:
+    if not compatible(source.get("names") or []):
         raise RuntimeError("기준 데이터셋 클래스 표가 일치하지 않습니다.")
     base = Path(source["path"])
     counts = {"train": 0, "val": 0, "test": 0, "site_test": 0, "ext_test": 0, "excludedSameVideo": 0, "videoAdded": 0}
@@ -602,7 +648,7 @@ def train(run: Path, epochs: int, device: str, baseline_limit: int | None, learn
         raise RuntimeError("박스 생성 후 기준 모델이 변경됐습니다. 새 실행을 만드세요.")
     base = base_weights(run)
     base_hash = hashlib.sha256(base.read_bytes()).hexdigest()
-    model = YOLO(str(base))
+    model = YOLO(str(expand_classes(base, run)))
     name = "video-" + run.name
     # 이미지 읽기·증강을 별도 프로세스로 돌려 GPU 계산과 겹친다. 실측상 병목은 GPU 계산이라 효과는 몇 % 수준이다.
     workers = min(8, max(1, (os.cpu_count() or 2) // 2))
@@ -617,7 +663,7 @@ def train(run: Path, epochs: int, device: str, baseline_limit: int | None, learn
     save(run / "model.json", {"weights": str(weights), "sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
                               "baseWeights": str(base), "baseSha256": base_hash, "dataset": str(combined),
                               "epochs": epochs, "device": device, "batch": BATCH, "workers": workers, "baselineLimit": baseline_limit,
-                              "learningRate": learning_rate,
+                              "learningRate": learning_rate, "classes": list(YOLO(str(weights)).names.values()),
                               "status": "CANDIDATE"})
     print(f"후보 모델: {weights}")
 
@@ -632,8 +678,9 @@ def evaluate(run: Path, device: str) -> None:
     base = Path(model_data.get("baseWeights", BASE_MODEL))
     if "baseSha256" in model_data and hashlib.sha256(base.read_bytes()).hexdigest() != model_data["baseSha256"]:
         raise RuntimeError("학습 후 베이스 모델 파일이 변경됐습니다.")
-    # 선택한 베이스가 같은 4개 클래스 모델이면 그보다 나아졌는지, 사전학습(COCO)이면 현장 기본 모델과 비교한다.
-    reference = base if list(YOLO(str(base)).names.values()) == CLASSES else BASE_MODEL
+    # 선택한 베이스가 현장 클래스 모델(4·6클래스)이면 그보다 나아졌는지, 사전학습(COCO)이면 현장 기본 모델과 비교한다.
+    # 기준 test는 앞 4개 클래스만 라벨돼 있어 4클래스 베이스와 6클래스 후보의 mAP가 같은 클래스로 비교된다.
+    reference = base if compatible(YOLO(str(base)).names.values()) else BASE_MODEL
     if "test" not in baseline:
         raise RuntimeError("독립 기준 데이터셋의 test split이 없습니다.")
     result = {"evaluationSet": str(run / "combined-dataset/dataset.yaml"), "split": "test", "models": {}}
@@ -671,6 +718,13 @@ def evaluate(run: Path, device: str) -> None:
             result["external"]["models"][name] = {"mAP50": float(metrics.box.map50), "mAP50_95": float(metrics.box.map),
                                                   "classes": {CLASSES[int(c)]: float(metrics.box.maps[int(c)]) for c in metrics.box.ap_class_index}}
         result["external"]["deltaMap50_95"] = result["external"]["models"]["candidate"]["mAP50_95"] - result["external"]["models"]["baseline"]["mAP50_95"]
+    # 기준 자료에 없는 새 클래스(중앙신호등·스마트 콘)는 val의 보강 데이터로만 참고 성능을 남긴다. 배포 판정에는 쓰지 않는다.
+    known = len(YOLO(str(reference)).names)
+    if known < len(CLASSES):
+        metrics = YOLO(model_data["weights"]).val(data=str(run / "combined-dataset/dataset.yaml"), split="val", device=device, imgsz=640,
+                                                  project=str(run / "evaluation"), name="new-classes", plots=False)
+        result["newClasses"] = {"split": "val", "classes": {CLASSES[int(c)]: {"mAP50": float(metrics.box.ap50[i]), "mAP50_95": float(metrics.box.ap[i])}
+                                                         for i, c in enumerate(metrics.box.ap_class_index) if int(c) >= known}}
     save(run / "evaluation.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

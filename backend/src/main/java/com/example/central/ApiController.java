@@ -48,13 +48,24 @@ public class ApiController {
   @GetMapping("/events")
   public EventPage events(
       @RequestParam(required = false) @Size(max = 64) String deviceId,
-      @RequestParam(required = false) @Pattern(regexp = "INTRUSION_START|INTRUSION_END")
+      @RequestParam(required = false) @Pattern(regexp = Models.EVENT_TYPES)
           String type,
       @RequestParam(required = false) OffsetDateTime from,
       @RequestParam(required = false) OffsetDateTime to,
       @RequestParam(defaultValue = "0") @Min(0) @Max(1000000) int page,
       @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
     return service.events(deviceId, type, from, to, page, size);
+  }
+
+  /** 관리자가 확인하지 않은 최근 24시간 쓰러짐(FALL_START), 최신순 최대 20건. */
+  @GetMapping("/alerts/falls")
+  public List<Event> openFalls() {
+    return service.openFalls();
+  }
+
+  @PostMapping("/events/{eventId}/ack")
+  public Event ackFall(Principal p, @PathVariable UUID eventId) {
+    return service.ackFall(eventId.toString(), p.getName());
   }
 
   @PostMapping("/iot/register")

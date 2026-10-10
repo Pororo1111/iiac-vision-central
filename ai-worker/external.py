@@ -1,4 +1,4 @@
-"""Roboflow Universe 데이터셋을 내려받고 중앙 4개 클래스로 자동 매핑한다.
+"""Roboflow Universe 데이터셋을 내려받고 중앙 클래스로 자동 매핑한다.
 
 다운로드·검증은 scripts/yolo_datasets.py 가 담당하며
 같은 버전은 .artifacts/ai-assets/datasets/roboflow 에 받아 둔 것을 다시 사용한다.
@@ -10,11 +10,15 @@ import sys
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
-CLASSES = ['person', 'safety_vest', 'traffic_cone', 'hard_hat']
+sys.path.insert(0, str(ROOT / 'scripts'))
+from ai_assets import CLASSES  # noqa: E402
 
 
 def auto_mapping(names):
-    """원본 클래스 이름을 CLASSES 번호로 바꾼다. 부정 클래스(NO-Hardhat 등)와 무관한 클래스는 None(버림)."""
+    """원본 클래스 이름을 CLASSES 번호로 바꾼다. 부정 클래스(NO-Hardhat 등)와 무관한 클래스는 None(버림).
+
+    중앙신호등·스마트 콘은 자체 제작 장치라 외부 데이터셋에 없으므로 앞 4개 클래스로만 연결한다.
+    """
     result = []
     for name in names:
         key = re.sub(r'[^a-z]', '', str(name).lower())
@@ -82,13 +86,12 @@ def process(job, api, env):
         key = env.get('ROBOFLOW_API_KEY', '').strip()
         if not key:
             raise ValueError('중앙 .env에 ROBOFLOW_API_KEY가 없습니다.')
-        sys.path.insert(0, str(ROOT / 'scripts'))
         from yolo_datasets import download_roboflow_universe
         track_progress(state)
         record, version = download_roboflow_universe(job['url'], key)
         mapping = auto_mapping(record['classes'])
         if not any(value is not None for value in mapping):
-            raise ValueError('4개 클래스(person·safety_vest·traffic_cone·hard_hat)와 연결되는 클래스가 없습니다. 원본 클래스: '
+            raise ValueError('person·safety_vest·traffic_cone·hard_hat과 연결되는 클래스가 없습니다. 원본 클래스: '
                              + ', '.join(str(c) for c in record['classes'])[:200] + '. 다른 버전(/dataset/번호)을 지정해 보세요.')
         if lost.is_set():
             raise RuntimeError('lease lost')

@@ -1,7 +1,8 @@
 name: central-server
 services:
   db:
-    image: postgres:17.9-alpine
+    # 오탐 판단 기억(V37)이 pgvector 확장을 쓴다. 기존 alpine 볼륨을 이 Debian 이미지로 여는 것은 검증하지 않았다(정렬 규칙 차이 확인 필요).
+    image: pgvector/pgvector:0.8.7-pg17
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-central}

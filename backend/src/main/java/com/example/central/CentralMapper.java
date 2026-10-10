@@ -205,19 +205,50 @@ public interface CentralMapper {
   String eventOwner(String id);
 
   String FILTER =
-      "<where><if test='deviceId != null'>device_id=#{deviceId}</if>"
-          + "<if test='type != null'> AND type=#{type}</if>"
-          + "<if test='from != null'> AND occurred_at &gt;= #{from}</if>"
-          + "<if test='to != null'> AND occurred_at &lt;= #{to}</if></where>";
+      "<where><if test='deviceId != null'>e.device_id=#{deviceId}</if>"
+          + "<if test='type != null'> AND e.type=#{type}</if>"
+          + "<if test='from != null'> AND e.occurred_at &gt;= #{from}</if>"
+          + "<if test='to != null'> AND e.occurred_at &lt;= #{to}</if></where>";
+
+  /** FALL_START는 같은 UUID의 탐지 배치 구간 판정(observations)을 Gemma 2차 확인으로 붙인다. */
+  String EVENT_COLUMNS =
+      "e.event_id::text AS event_id,e.device_id,e.camera_id,e.zone_id,e.type,e.occurred_at,e.received_at,"
+          + "e.object_count,"
+          + "CASE WHEN e.type&lt;&gt;'FALL_START' THEN NULL"
+          + " WHEN o.batch_id IS NULL OR o.status IN ('QUEUED','RUNNING') THEN 'PENDING'"
+          + " WHEN o.status='COMPLETED' AND coalesce(o.fallen,0)&gt;0 THEN 'CONFIRMED'"
+          + " WHEN o.status='COMPLETED' THEN 'NOT_CONFIRMED' ELSE 'UNAVAILABLE' END AS fall_check,"
+          + "CASE WHEN e.type='FALL_START' THEN o.fallen END AS fallen,"
+          + "CASE WHEN e.type='FALL_START' THEN o.summary END AS check_summary,"
+          + "e.type='FALL_START' AND coalesce(o.has_thumbnail,false) AS has_thumbnail,"
+          + "a.acked_at,a.acked_by"
+          + " FROM events e LEFT JOIN observations o ON o.batch_id=e.event_id"
+          + " LEFT JOIN event_acks a ON a.event_id=e.event_id ";
 
   @Select(
-      "<script>SELECT event_id::text AS"
-          + " event_id,device_id,camera_id,zone_id,type,occurred_at,received_at,object_count FROM"
-          + " events "
+      "<script>SELECT "
+          + EVENT_COLUMNS
           + FILTER
-          + " ORDER BY occurred_at DESC,event_id DESC LIMIT #{size} OFFSET #{offset}</script>")
+          + " ORDER BY e.occurred_at DESC,e.event_id DESC LIMIT #{size} OFFSET #{offset}</script>")
   List<Event> events(EventQuery query);
 
-  @Select("<script>SELECT count(*) FROM events " + FILTER + "</script>")
+  @Select("<script>SELECT count(*) FROM events e " + FILTER + "</script>")
   long eventCount(EventQuery query);
+
+  /** 관리자가 확인하지 않은 최근 쓰러짐(FALL_START). */
+  @Select(
+      "<script>SELECT "
+          + EVENT_COLUMNS
+          + " WHERE e.type='FALL_START' AND a.event_id IS NULL AND e.occurred_at &gt;= #{since}"
+          + " ORDER BY e.occurred_at DESC,e.event_id DESC LIMIT #{limit}</script>")
+  List<Event> openFalls(
+      @Param("since") java.time.OffsetDateTime since, @Param("limit") int limit);
+
+  @Select("<script>SELECT " + EVENT_COLUMNS + " WHERE e.event_id=CAST(#{id} AS uuid)</script>")
+  Event event(String id);
+
+  @Insert(
+      "INSERT INTO event_acks(event_id,acked_by) VALUES(CAST(#{id} AS uuid),#{admin})"
+          + " ON CONFLICT(event_id) DO NOTHING")
+  int ackEvent(@Param("id") String id, @Param("admin") String admin);
 }

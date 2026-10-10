@@ -25,6 +25,15 @@ $PY scripts/train-test-video.py cleanup --run "$RUN"
 
 워커가 종료되면 임대 만료 후 실패 처리한다. 자동 재학습·자동 현장 교체는 하지 않는다. 데이터셋 실패는 새 실행으로 재구성한다. 사용자 요청에 따라 감시 일시중지를 유지하며 테스트 시 필요한 소량만 수집한다.
 
+## 6클래스 학습 (2026-10-09)
+
+- 클래스 표는 `scripts/ai_assets.py`의 `CLASSES` 한곳에 둔다: `person, safety_vest, traffic_cone, hard_hat, signal_tower, smart_cone`. 새 클래스는 항상 뒤에 붙여 번호를 유지하며, 앞부분이 같은 4클래스 기준 모델·기준 데이터셋·이전 스냅샷·외부 데이터셋은 그대로 쓴다(`compatible`).
+- 4클래스 베이스에서 학습하면 `expand_classes`가 분류 출력층(`cv3`·`one2one_cv3` 마지막 층)의 기존 4개 행을 옮긴 6클래스 체크포인트(`base-expanded.pt`)를 만들어 이어학습한다. YOLO26 상자 출력(`cv2`)은 채널 수가 4로 같아 이름으로 구분한다. 기준 test에서 기존 모델 mAP50–95 0.5026, 확장 직후 0.5004로 기존 클래스 판단이 유지됨을 확인했다.
+- 배포 판정은 그대로 기준 test(앞 4개 클래스만 라벨) mAP50–95 비교다. 새 클래스는 기준 자료에 없으므로 `evaluation.json`의 `newClasses`에 val(보강 데이터) 클래스별 mAP를 참고값으로만 남긴다.
+- 새 클래스 데이터는 `local:claude-site-devices-20261009`(id 74fcd17c, train 39·val 10)뿐이다. 외부(로보플로우) 데이터셋에는 두 클래스가 없고, 빠진 클래스 채우기도 4클래스 기준 모델로 하므로 그 사진에 장치가 찍혀 있으면 배경으로 배운다.
+- 새 클래스 오버샘플링(2026-10-09): 검토한 `local:` 데이터셋 train 이미지 중 새 클래스(번호 4 이상) 박스가 있는 사진을 `NEW_CLASS_REPEAT`(10)배로 복사해 넣는다(`_r1`~`_r9` 이름, val은 복사 안 함, 스냅샷 `counts.newClassRepeated`).
+- 후보의 클래스 표는 `model.json` `classes` → V36 `model_releases.classes` → 배포 정보 `classes`로 전달된다. IoT가 6클래스 모델을 받아들이는 변경은 `docs/IOT_SESSION_HANDOFF.md`에 인계했고 미구현이다.
+
 ## 이전 파이프라인 기록
 
 ### 이전 단계

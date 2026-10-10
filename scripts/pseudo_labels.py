@@ -3,7 +3,7 @@ import hashlib
 import math
 from pathlib import Path
 
-CLASSES = ['person', 'safety_vest', 'traffic_cone', 'hard_hat']
+from ai_assets import CLASSES, compatible
 POLICY = 'yolo-gemma-consensus-v1'
 
 
@@ -83,7 +83,7 @@ def select(tags, detections, threshold=0.6):
 def generate(run, base_model, gemma, sample_ids, threshold=0.6, device='cpu'):
     from ultralytics import YOLO
     model = YOLO(str(base_model))
-    if [model.names[i] for i in range(len(model.names))] != CLASSES:
+    if not compatible(model.names[i] for i in range(len(model.names))):
         raise ValueError('기준 모델 클래스 표가 일치하지 않습니다.')
     items = []
     for sample_id in sample_ids:

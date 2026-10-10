@@ -2,8 +2,15 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, csrfJson } from "../../lib/api";
 
-/** 오탐 확인(V33·V34): Gemma가 오탐·애매로 본 보호구 박스가 있는 원본 사진. 관리자가 박스별로 정해 승인하면 데이터셋에 쌓인다. */
-export type Verdict = { index: number; cls: string; score: number; box: number[]; verdict: "real" | "false" | "unsure"; seen: string; reason: string };
+/**
+ * 오탐 확인(V33·V34): 오탐·애매로 본 보호구 박스가 있는 원본 사진. 관리자가 박스별로 정해 승인하면 데이터셋에 쌓이고,
+ * 그 판단은 오탐 판단 기억(V37)이 되어 다음 확인 때 비슷한 박스의 판정 근거로 쓰인다.
+ */
+export type MemoryMatch = { id: string; source: "CLAUDE" | "ADMIN"; label: "real" | "false"; similarity: number; opposite: number | null };
+export type Verdict = {
+  index: number; cls: string; score: number; box: number[]; verdict: "real" | "false" | "unsure"; seen: string; reason: string;
+  method?: "gemma" | "memory" | "rag"; match?: MemoryMatch;
+};
 export type ReviewItem = {
   item: {
     id: string;
@@ -22,8 +29,11 @@ type Obj = { index: number; cls: string; score: number; box: number[] };
 type Detail = ReviewItem & { width: number; height: number; objects: Obj[] };
 type Dataset = { url: string; train: number; val: number; boxes: number };
 
-export const clsNames: Record<string, string> = { hard_hat: "안전모", safety_vest: "안전조끼", person: "사람", traffic_cone: "콘" };
+export const clsNames: Record<string, string> = { hard_hat: "안전모", safety_vest: "안전조끼", person: "사람", traffic_cone: "콘", signal_tower: "중앙신호등", smart_cone: "스마트 콘" };
 const verdictNames = { real: "정탐", false: "오탐", unsure: "애매" };
+// memory: 사람이 판단한 비슷한 사례로 바로 결정(Gemma 호출 없음), rag: 비슷한 사례를 예시로 붙여 Gemma 판정, gemma: 고정 예시
+const methodNames = { memory: "판단 기억", rag: "Gemma+유사 사례", gemma: "Gemma" };
+const sourceNames = { ADMIN: "관리자", CLAUDE: "Claude" };
 const statusNames = { PENDING: "확인 필요", APPROVED: "승인됨", REJECTED: "반려됨", NOT_NEEDED: "확인 불필요" };
 
 export function verdictsOf(item: ReviewItem["item"]): Verdict[] {
@@ -72,13 +82,27 @@ export function ReviewCards({ items, onOpen }: { items: ReviewItem[]; onOpen: (i
             <div className="vsx-tags">
               {verdicts.map((v) => (
                 <span key={v.index} className={`fpr-tag ${v.verdict}`} title={v.reason}>
-                  {clsNames[v.cls] ?? v.cls} {verdictNames[v.verdict]} · {v.seen}
+                  {clsNames[v.cls] ?? v.cls} {verdictNames[v.verdict]} · {v.method === "memory" ? `${methodNames.memory} ${v.match?.similarity.toFixed(2)}` : v.seen}
                 </span>
               ))}
             </div>
           </article>
         );
       })}
+    </div>
+  );
+}
+
+/** 판정 근거가 된 사람 판단 사례(확대 사진)와 유사도. 원본이 지워진 사례는 사진 없이 글만 남긴다. */
+function MatchCase({ match }: { match: MemoryMatch }) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <div className="fpr-match">
+      {!broken && <img src={`/api/training/fp-memory/${match.id}/image`} alt="" onError={() => setBroken(true)} />}
+      <small>
+        가장 비슷한 사례: {sourceNames[match.source]} 판단 <b>{verdictNames[match.label]}</b> · 유사도 {match.similarity.toFixed(2)}
+        {match.opposite != null && <> (반대 판단 최고 {match.opposite.toFixed(2)})</>}
+      </small>
     </div>
   );
 }
@@ -148,13 +172,14 @@ export function ReviewDialog({ id, onClose, onDone }: { id: string; onClose: () 
               ]} />
             </div>
             <div className="fpr-side">
-              <p className="muted">박스마다 정탐(라벨 유지) 또는 오탐(라벨에서 뺌)을 고르세요. 기본값은 Gemma 판정이며, 애매한 박스는 직접 골라야 합니다.</p>
+              <p className="muted">박스마다 정탐(라벨 유지) 또는 오탐(라벨에서 뺌)을 고르세요. 기본값은 자동 판정이며, 애매한 박스는 직접 골라야 합니다. 승인한 판단은 다음 확인의 비교 사례가 됩니다.</p>
               {verdicts.map((v) => (
                 <div key={v.index} className="fpr-row">
                   <div>
                     <strong>#{v.index} {clsNames[v.cls] ?? v.cls}</strong> <small>YOLO {v.score.toFixed(2)}</small>
-                    <p><span className={`fpr-tag ${v.verdict}`}>Gemma {verdictNames[v.verdict]}</span> {v.seen}</p>
+                    <p><span className={`fpr-tag ${v.verdict}`}>{methodNames[v.method ?? "gemma"]} {verdictNames[v.verdict]}</span> {v.seen}</p>
                     <small className="muted">{v.reason}</small>
+                    {v.match && <MatchCase match={v.match} />}
                   </div>
                   <div className="fpr-toggle" role="group" aria-label={`#${v.index} 판정`}>
                     <button disabled={!pending} className={decisions[v.index] === "keep" ? "on keep" : ""} onClick={() => setDecisions({ ...decisions, [v.index]: "keep" })}>정탐</button>
@@ -165,7 +190,9 @@ export function ReviewDialog({ id, onClose, onDone }: { id: string; onClose: () 
               {persons.length > 0 && <small className="muted">사람·콘 박스 {persons.length}개는 YOLO 결과 그대로 라벨에 남습니다.</small>}
               {result ? (
                 <p className="fpr-result">
-                  {result.status === "APPROVED" ? "승인했습니다. 데이터셋에 추가했습니다." : "반려했습니다. 데이터셋에 넣지 않습니다."}
+                  {result.status === "APPROVED"
+                    ? `승인했습니다. 데이터셋에 추가했고, 박스 판단 ${verdicts.length}건을 판단 기억에 넣었습니다(다음 확인부터 비교 사례로 사용).`
+                    : "반려했습니다. 데이터셋과 판단 기억에 넣지 않습니다."}
                   <br />누적 데이터셋 {result.dataset.url}: train {result.dataset.train} · val {result.dataset.val}
                 </p>
               ) : !pending ? (

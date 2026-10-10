@@ -45,6 +45,9 @@ public interface DeploymentMapper {
   List<PolicyHistory> history(String device);
   @Select("SELECT DISTINCT ON (device_id) "+DEPLOY+" FROM model_deployments ORDER BY device_id,created_at DESC,id DESC") List<Deployment> latestPerDevice();
   @Insert("INSERT INTO model_releases(id,sha256,size_bytes) VALUES(#{id}::uuid,#{hash},#{size}) ON CONFLICT(id) DO NOTHING") void register(String id,String hash,long size);
+  /** 후보 모델의 클래스 표(JSON 배열). 학습 결과 model.json의 classes에서 온다. */
+  @Update("UPDATE model_releases SET classes=#{classes}::jsonb WHERE id=#{id}::uuid") void setClasses(String id,String classes);
+  @Select("SELECT classes::text FROM model_releases WHERE id=#{id}::uuid") String classes(String id);
   @Insert("INSERT INTO model_releases(id,sha256,size_bytes,kind,label) VALUES(#{id}::uuid,#{hash},#{size},'BASE',#{label})") void registerBase(String id,String hash,long size,String label);
   @Select("SELECT "+MODEL+" FROM model_releases WHERE kind='BASE' AND sha256=#{hash}") Model baseBySha(String hash);
   /** 현장 장치가 보고했거나 평가 기준 모델로 쓰인 해시인지 확인한다. */

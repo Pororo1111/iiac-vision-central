@@ -15,10 +15,10 @@ public final class PipelineModels {
       String phase,Integer progress) {}
   public record ExternalBeat(@NotNull UUID leaseToken,@Pattern(regexp="EXPORT|DOWNLOAD|EXTRACT|VALIDATE") String phase,@Min(0) @Max(100) Integer progress) {}
   public record ExternalRequest(@NotBlank @Size(max=300) String url) {}
-  /** mapping[i]는 원본 클래스 i를 CLASSES 번호(0~3)로 바꾼 값이며 null은 버림이다. */
+  /** mapping[i]는 원본 클래스 i를 CLASSES 번호(0~5)로 바꾼 값이며 null은 버림이다. */
   public record ExternalComplete(@NotNull UUID leaseToken,@NotBlank @Size(max=200) String name,@Min(1) int version,
       @NotBlank @Size(max=500) String yamlPath,@NotNull @Size(min=1,max=200) List<@NotNull @Size(max=100) String> classes,
-      @NotNull @Size(min=1,max=200) List<@Min(0) @Max(3) Integer> mapping,@NotBlank @Size(max=2000) String counts) {}
+      @NotNull @Size(min=1,max=200) List<@Min(0) @Max(5) Integer> mapping,@NotBlank @Size(max=2000) String counts) {}
   /** 선택한 외부 데이터셋은 train·val 전체를 사용한다. */
   public record ExternalChoice(@NotNull UUID id) {}
 

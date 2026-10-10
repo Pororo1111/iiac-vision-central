@@ -7,6 +7,7 @@ import {
   authPost,
   csrfJson,
   type Device,
+  type Event,
   type EventPage,
 } from "../lib/api";
 import LiveCamera from "./components/live-camera";
@@ -23,6 +24,33 @@ function timestamp(value: string | null) {
         second: "2-digit",
       })
     : "수신 전";
+}
+const eventNames: Record<string, string> = {
+  INTRUSION_START: "침입 시작",
+  INTRUSION_END: "침입 종료",
+  FALL_START: "쓰러짐 감지",
+  FALL_END: "쓰러짐 해제",
+};
+const eventBadges: Record<string, string> = {
+  INTRUSION_START: "warning",
+  INTRUSION_END: "success",
+  FALL_START: "danger",
+  FALL_END: "neutral",
+};
+const fallChecks: Record<string, [string, string]> = {
+  PENDING: ["AI 확인 중", "neutral"],
+  CONFIRMED: ["AI 확인: 쓰러짐", "danger"],
+  NOT_CONFIRMED: ["AI 미확인 · 오경보 가능", "success"],
+  UNAVAILABLE: ["AI 판정 불가", "neutral"],
+};
+function FallCheck({ e }: { e: Event }) {
+  if (!e.fallCheck) return null;
+  const [label, tone] = fallChecks[e.fallCheck] ?? fallChecks.UNAVAILABLE;
+  return (
+    <span className={`badge ${tone}`} title={e.checkSummary ?? undefined}>
+      {label}
+    </span>
+  );
 }
 export default function Dashboard() {
   const router = useRouter();
@@ -46,6 +74,20 @@ export default function Dashboard() {
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [liveDevice, setLiveDevice] = useState<Device | null>(null);
   const [monitoringBusy, setMonitoringBusy] = useState("");
+  const [falls, setFalls] = useState<Event[]>([]);
+  const [ackBusy, setAckBusy] = useState("");
+  async function ackFall(e: Event) {
+    setAckBusy(e.eventId);
+    try {
+      await csrfJson<Event>(`/events/${e.eventId}/ack`);
+      setFalls((current) => current.filter((f) => f.eventId !== e.eventId));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) router.replace("/login");
+      else setError("쓰러짐 알림을 확인 처리하지 못했습니다.");
+    } finally {
+      setAckBusy("");
+    }
+  }
   async function requestMonitoring(d: Device, action: "PAUSE" | "RESUME") {
     const verb = action === "PAUSE" ? "중지" : "재개";
     if (!window.confirm(`${d.name}의 감시를 ${verb}할까요? IoT가 다음 heartbeat(최대 약 5초)에 반영합니다.`)) return;
@@ -93,13 +135,15 @@ export default function Dashboard() {
         if (type) params.set("type", type);
         if (from) params.set("from", new Date(from).toISOString());
         if (to) params.set("to", new Date(to).toISOString());
-        const [d, e] = await Promise.all([
+        const [d, e, f] = await Promise.all([
           api<Device[]>("/devices", { signal: controller.signal }),
           api<EventPage>(`/events?${params}`, { signal: controller.signal }),
+          api<Event[]>("/alerts/falls", { signal: controller.signal }),
         ]);
         if (active) {
           setDevices(d);
           setEvents(e);
+          setFalls(f);
           setLastUpdate(new Date().toISOString());
           setError("");
         }
@@ -199,6 +243,49 @@ export default function Dashboard() {
             <p className="error" role="alert">
               {error}
             </p>
+          )}
+          {falls.length > 0 && (
+            <section className="fall-alerts" role="alert" aria-label="쓰러짐 알림">
+              <div className="fall-alerts-head">
+                <strong>⚠ 쓰러짐 감지 {falls.length}건</strong>
+                <span>
+                  현장 장치가 자세로 판정했고, 원본 사진을 AI(Gemma)가 다시 확인합니다. 현장을 확인한 뒤 확인 처리하세요.
+                </span>
+              </div>
+              <ul>
+                {falls.map((f) => {
+                  const device = devices.find((d) => d.deviceId === f.deviceId);
+                  return (
+                    <li key={f.eventId} className={f.fallCheck === "NOT_CONFIRMED" ? "muted-alert" : ""}>
+                      {f.hasThumbnail && (
+                        <a href={`/api/observations/${f.eventId}/thumbnail`} target="_blank" rel="noreferrer">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={`/api/observations/${f.eventId}/thumbnail`} alt="쓰러짐 순간 원본 사진" />
+                        </a>
+                      )}
+                      <div className="fall-alert-body">
+                        <div>
+                          <b>{device?.name ?? f.deviceId}</b> · {f.cameraId}{" "}
+                          <span className="tabular">{timestamp(f.occurredAt)}</span>
+                        </div>
+                        <FallCheck e={f} />
+                        {f.checkSummary && <p>{f.checkSummary}</p>}
+                      </div>
+                      <div className="fall-alert-actions">
+                        {device && (
+                          <button onClick={() => setLiveDevice(device)} disabled={!device.online}>
+                            카메라 보기
+                          </button>
+                        )}
+                        <button onClick={() => ackFall(f)} disabled={ackBusy === f.eventId}>
+                          확인 처리
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
           )}
           <section className="metrics" aria-label="장치 요약">
             <article>
@@ -351,8 +438,8 @@ export default function Dashboard() {
           <section className="panel" id="events">
             <div className="panel-heading">
               <div>
-                <h2>침입 이벤트</h2>
-                <p>영역 내 침입 시작과 종료 기록입니다.</p>
+                <h2>현장 이벤트</h2>
+                <p>침입 시작·종료와 쓰러짐 감지·해제 기록입니다.</p>
               </div>
               <span className="small-label">EVENT LOG</span>
             </div>
@@ -386,6 +473,8 @@ export default function Dashboard() {
                   <option value="">전체 이벤트</option>
                   <option value="INTRUSION_START">침입 시작</option>
                   <option value="INTRUSION_END">침입 종료</option>
+                  <option value="FALL_START">쓰러짐 감지</option>
+                  <option value="FALL_END">쓰러짐 해제</option>
                 </select>
               </label>
               <label>
@@ -440,18 +529,20 @@ export default function Dashboard() {
                     <tr key={e.eventId}>
                       <td className="tabular">{timestamp(e.occurredAt)}</td>
                       <td>
-                        <span
-                          className={`badge ${e.type === "INTRUSION_START" ? "warning" : "success"}`}
-                        >
-                          {e.type === "INTRUSION_START"
-                            ? "침입 시작"
-                            : "침입 종료"}
+                        <span className={`badge ${eventBadges[e.type] ?? "neutral"}`}>
+                          {eventNames[e.type] ?? e.type}
                         </span>
+                        {e.fallCheck && (
+                          <span className="subline">
+                            <FallCheck e={e} />
+                            {e.ackedAt && " 확인됨"}
+                          </span>
+                        )}
                       </td>
                       <td className="mono">{e.deviceId}</td>
                       <td>
                         {e.cameraId}
-                        <span className="subline">{e.zoneId}</span>
+                        <span className="subline">{e.zoneId || "카메라 전체"}</span>
                       </td>
                       <td>{e.objectCount}개</td>
                       <td className="tabular">{timestamp(e.receivedAt)}</td>

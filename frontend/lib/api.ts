@@ -106,6 +106,13 @@ export type Event = {
   occurredAt: string;
   receivedAt: string;
   objectCount: number;
+  /** FALL_START만: Gemma 2차 확인(같은 UUID 탐지 배치의 장면 판정). */
+  fallCheck: "PENDING" | "CONFIRMED" | "NOT_CONFIRMED" | "UNAVAILABLE" | null;
+  fallen: number | null;
+  checkSummary: string | null;
+  hasThumbnail: boolean;
+  ackedAt: string | null;
+  ackedBy: string | null;
 };
 export type EventPage = {
   items: Event[];

@@ -18,6 +18,7 @@ import cv2
 from PIL import Image, ImageDraw
 
 import fp_check
+import fp_memory
 from worker import OLLAMA, ROOT, TOKEN, api, encoded, ollama
 
 MODEL = 'gemma4:12b'
@@ -503,6 +504,12 @@ def main():
                 print('분석 모델 연결 복구', flush=True)
                 down = False
             try:
+                # 관리자가 방금 승인한 판단은 다음 오탐 확인부터 쓰이도록 가장 먼저 임베딩한다(V37, 박스당 0.1초 안팎).
+                try:
+                    worked = fp_memory.fill_pending() > 0
+                except error.HTTPError as exc:
+                    if exc.code != 404:
+                        raise  # 404는 기억 API가 없는 이전 중앙 버전
                 # 질문은 관리자가 기다리므로 구간 분석보다 먼저 처리한다.
                 question = api('/search/questions/claim', {})
                 if question:
