@@ -12,10 +12,16 @@
 |---|---|---|
 | 1 | 사람이 보이는 프레임마다 `yolo26n-pose`(TensorRT FP16 권장)로 17개 키포인트를 구하고 ByteTrack으로 추적한다. 규칙 판정은 10fps 이상으로 돌린다 | – |
 | 2 | `scripts/fall_rules.py` 규칙으로 FALL_START를 확정한다 | – |
-| 3 | `POST /api/iot/events`로 `FALL_START`를 보낸다. zoneId는 생략하고, objectCount는 쓰러진 사람 수다 | 이벤트를 저장하고 관제 화면에 빨간 알림을 띄운다(5초 갱신) |
+| 3 | `POST /api/iot/events`로 `FALL_START`를 보낸다. zoneId는 생략하고, objectCount는 쓰러진 사람 수다 | 이벤트를 저장한다(관제 화면 알림은 2026-10-12 제거, 아래 화면 노출 절) |
 | 4 | 같은 UUID를 batchId로 써서 프레임 1개짜리 탐지 배치를 보낸다(`startedAt=at`, `endedAt=at+1ms`, 사람 박스) | 원본 사진 1장을 기다리는 구간 작업을 만든다. 쓰러짐 작업은 대기열에서 먼저 처리된다 |
 | 5 | 같은 batchId와 `at`으로 오버레이 없는 원본 1장을 보낸다(`/api/iot/detection-snapshots`) | Gemma 장면 판정 결과가 이벤트의 `fallCheck`가 된다 |
-| 6 | 일어나 서 있는 상태가 2초 이어지거나 5초 넘게 사람이 안 보이면 `FALL_END`를 보낸다 | 기록만 남긴다. 알림은 관리자가 확인 처리할 때까지 남는다 |
+| 6 | 일어나 서 있는 상태가 2초 이어지거나 5초 넘게 사람이 안 보이면 `FALL_END`를 보낸다 | 기록만 남긴다 |
+
+## 화면 노출 (2026-10-12)
+
+- 사용자 결정: 현재 쓰러짐 정확도가 낮아 통합 관제 화면에서 쓰러짐 알림·이벤트(목록·유형 필터)를 제거했다. 관제 화면은 `GET /api/events?intrusionOnly=true`로 침입 이벤트만 조회한다.
+- 쓰러짐은 `/video-search` 대화에서 질문할 때만 본다(예: "쓰러진 사람 있어?" → `fallen=true` 조건, Gemma 장면 판정 `fallen>0` 구간).
+- 이벤트 저장·Gemma 2차 확인·`/api/alerts/falls`·확인 처리 API는 그대로 둔다. 제거 시점 FALL_START 15건 중 Gemma가 쓰러짐으로 판정한 구간은 0건이다(완료 11·생략 4).
 
 ## 판정 규칙(`scripts/fall_rules.py`)
 

@@ -53,8 +53,9 @@ public class ApiController {
       @RequestParam(required = false) OffsetDateTime from,
       @RequestParam(required = false) OffsetDateTime to,
       @RequestParam(defaultValue = "0") @Min(0) @Max(1000000) int page,
-      @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
-    return service.events(deviceId, type, from, to, page, size);
+      @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+      @RequestParam(defaultValue = "false") boolean intrusionOnly) {
+    return service.events(deviceId, type, from, to, page, size, intrusionOnly);
   }
 
   /** 관리자가 확인하지 않은 최근 24시간 쓰러짐(FALL_START), 최신순 최대 20건. */

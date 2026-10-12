@@ -81,10 +81,16 @@ public class CentralService {
 
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
   public EventPage events(
-      String deviceId, String type, OffsetDateTime from, OffsetDateTime to, int page, int size) {
+      String deviceId,
+      String type,
+      OffsetDateTime from,
+      OffsetDateTime to,
+      int page,
+      int size,
+      boolean intrusionOnly) {
     if (from != null && to != null && from.isAfter(to))
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "INVALID_DATE_RANGE");
-    var query = new EventQuery(deviceId, type, from, to, size, (long) page * size);
+    var query = new EventQuery(deviceId, type, from, to, size, (long) page * size, intrusionOnly);
     return new EventPage(mapper.events(query), mapper.eventCount(query), page, size);
   }
 

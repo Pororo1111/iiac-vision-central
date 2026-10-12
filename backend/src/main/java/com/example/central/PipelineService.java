@@ -242,6 +242,9 @@ public class PipelineService {
     String value=name.strip().replaceAll("\\s+"," ");
     if(value.length()>40) value=value.substring(0,40).strip();
     require(!value.isEmpty(),"INVALID_NAME");
+    // 워커가 붙인 이름(Gemma 추천) 끝에 이름을 정한 날짜(KST)를 붙인다. 이미 날짜로 끝나면 바꾸지 않는다.
+    String date=java.time.LocalDate.now(KST).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+    if(!value.matches(".*\\d{8}")) value=value+"_"+date;
     String unique=unique(id,value);
     require(db.named(id,unique)==1,"NAMING_LEASE_LOST");
     var p=db.pipeline(id);

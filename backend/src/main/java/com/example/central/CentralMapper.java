@@ -207,6 +207,7 @@ public interface CentralMapper {
   String FILTER =
       "<where><if test='deviceId != null'>e.device_id=#{deviceId}</if>"
           + "<if test='type != null'> AND e.type=#{type}</if>"
+          + "<if test='intrusionOnly'> AND e.type IN ('INTRUSION_START','INTRUSION_END')</if>"
           + "<if test='from != null'> AND e.occurred_at &gt;= #{from}</if>"
           + "<if test='to != null'> AND e.occurred_at &lt;= #{to}</if></where>";
 

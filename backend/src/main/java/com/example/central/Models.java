@@ -179,7 +179,8 @@ public final class Models {
       OffsetDateTime from,
       OffsetDateTime to,
       int size,
-      long offset) {}
+      long offset,
+      boolean intrusionOnly) {}
 
   public record EventPage(List<Event> items, long total, int page, int size) {}
 }

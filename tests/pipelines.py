@@ -225,7 +225,8 @@ class Pipelines(unittest.TestCase):
         sql(f"UPDATE external_datasets SET status='FAILED',error='검증용 실패' WHERE id='{external}'")
         self.assertTrue(named, 'AI 워커·Ollama 실행 여부를 확인하세요.')
         self.assertNotEqual(named['pipeline']['name'], '이름 생성 대기')
-        self.assertLessEqual(len(named['pipeline']['name']), 44)
+        self.assertLessEqual(len(named['pipeline']['name']), 53)
+        self.assertRegex(named['pipeline']['name'], r'_\d{8}( #\d+)?$')
         print('Gemma 추천 이름:', named['pipeline']['name'])
 
     def test_external_progress_and_delete(self):

@@ -99,8 +99,8 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 
 | API | 동작 |
 |---|---|
-| `GET /api/events` | 각 항목에 아래 필드를 더했다. `type` 필터에 `FALL_START`·`FALL_END`를 쓸 수 있다 |
-| `GET /api/alerts/falls` | 관리자가 확인하지 않은 최근 24시간 `FALL_START` 배열(최신순, 최대 20건). 항목 형식은 이벤트와 같다 |
+| `GET /api/events` | 각 항목에 아래 필드를 더했다. `type` 필터에 `FALL_START`·`FALL_END`를 쓸 수 있다. `intrusionOnly=true`면 침입 이벤트만 돌려준다(통합 관제 화면이 사용, 2026-10-12) |
+| `GET /api/alerts/falls` | 관리자가 확인하지 않은 최근 24시간 `FALL_START` 배열(최신순, 최대 20건). 항목 형식은 이벤트와 같다. 2026-10-12부터 화면에서 쓰지 않는다 |
 | `POST /api/events/{eventId}/ack` | 쓰러짐 알림 확인. 성공하면 200과 갱신된 이벤트를 돌려준다. 다시 확인해도 첫 기록을 유지한다. 쓰러짐이 아닌 이벤트는 400 `NOT_FALL_EVENT`, 없는 이벤트는 404 `EVENT_NOT_FOUND`, UUID 형식 오류는 400, CSRF가 없으면 403 |
 
 | 이벤트 필드 | 의미 |
@@ -119,7 +119,7 @@ heartbeat 응답에 두 필드가 추가된다. 둘 다 요청 후 2분이 지�
 - `GET /api/devices/{deviceId}/cameras/{cameraId}/sources`: 아래 카메라 원본 절. 없는 카메라 404.
 - `POST /api/devices/{deviceId}/cameras/{cameraId}/view-session`: 관리자 세션+CSRF 필요. 정확한 카메라 경로만 읽을 수 있는 5분짜리 토큰과 WHEP URL 반환.
 - `GET /api/events`: `{items: [...], total, page, size}`.
-- 선택 필터: `deviceId`, `type`, `from`, `to` (발생 시각 기준, 양 끝 포함). `type`은 `INTRUSION_START`·`INTRUSION_END`·`FALL_START`·`FALL_END`.
+- 선택 필터: `deviceId`, `type`, `from`, `to` (발생 시각 기준, 양 끝 포함). `type`은 `INTRUSION_START`·`INTRUSION_END`·`FALL_START`·`FALL_END`. `intrusionOnly`(기본 false)가 true면 침입 시작·종료만 조회한다.
 - `page`는 0부터(최대 1,000,000), `size`는 1~100(기본 20).
 - 이벤트는 `occurredAt DESC, eventId DESC` 고정 정렬. 각 항목은 입력 필드와 중앙 생성 `receivedAt`을 포함합니다.
 - `GET /api/health`: 익명 200 `{"status":"UP"}`. API 프로세스 생존 확인용이며 DB 실시간 진단용은 아닙니다.
@@ -355,7 +355,7 @@ MediaMTX는 POST `/internal/media/auth` 콜백으로 장치 publish 또는 관�
 - 학습 기본값: 마법사 epoch 100, imgsz 640, batch 8(고정), AdamW lr0 0.0001.
 - 수집 이미지 자동 분할: 자동 선별을 통과한 수집 이미지를 묶음(같은 영상 가져오기, 같은 장치·카메라의 10분 구간, 직접 올린 이미지는 한 장씩) 단위로 train/val/test 70/15/15 나눈다. 묶음이 5개 미만이면 모두 train. 현장 test는 `images/site_test`에 따로 두며 배포 판정용 기준 test 82장과 섞지 않는다.
 - 현장 test가 10장 이상이면 평가 결과에 `evaluation.site`(기준·후보 mAP, `deltaMap50_95`)를 참고로 기록한다. 라벨이 현장 기본 모델의 박스 초안에서 오므로 기본 모델에 유리하게 나올 수 있고, 배포 판정에는 쓰지 않는다.
-- 이름: 파이프라인 이름은 입력받지 않는다(V15). 파이프라인을 만들면(자동 파이프라인 포함) 워커가 다른 대기 작업보다 먼저 Gemma(`gemma4:12b`)로 40자 이내 이름을 추천한다(2026-10-04 변경, 이전에는 학습 종료 후). 입력은 수집 방식·대상 규모·로보플로우 데이터·학습 옵션이며 학습 결과는 없다. 파이프라인은 이름이 정해진 뒤에 그 이름으로 학습 실행을 만들고, 학습 직전 3분(워커 임대 중이면 임대 기한)까지 이름이 없으면 메시지 `Gemma가 모델 이름을 정하는 중`으로 기다린 뒤 서버 규칙 이름으로 진행한다. Gemma 호출이 실패해도 워커가 규칙 이름(예: `Roboflow-Y26n-3ep`, 자동은 `자동-…`)을 쓰며, 중복이면 ` #2`를 붙인다. 내부 `/internal/ai/pipelines/naming/claim`, `/internal/ai/pipelines/{id}/name`.
+- 이름: 파이프라인 이름은 입력받지 않는다(V15). 파이프라인을 만들면(자동 파이프라인 포함) 워커가 다른 대기 작업보다 먼저 Gemma(`gemma4:12b`)로 40자 이내 이름을 추천한다(2026-10-04 변경, 이전에는 학습 종료 후). 입력은 수집 방식·대상 규모·로보플로우 데이터·학습 옵션이며 학습 결과는 없다. 파이프라인은 이름이 정해진 뒤에 그 이름으로 학습 실행을 만들고, 학습 직전 3분(워커 임대 중이면 임대 기한)까지 이름이 없으면 메시지 `Gemma가 모델 이름을 정하는 중`으로 기다린 뒤 서버 규칙 이름으로 진행한다. Gemma 호출이 실패해도 워커가 규칙 이름(예: `Roboflow-Y26n-3ep`, 자동은 `자동-…`)을 쓴다. 워커가 보낸 이름 끝에는 서버가 이름을 정한 날짜(KST)를 `_YYYYMMDD`로 붙인다(2026-10-12, 예: `RoboFlow_yolo26n_v1_20261012`, 이미 8자리 숫자로 끝나면 생략). 서버 규칙 이름 대체 경로에는 붙이지 않는다. 중복이면 ` #2`를 붙인다. 내부 `/internal/ai/pipelines/naming/claim`, `/internal/ai/pipelines/{id}/name`.
 
 ## 전역 자동 파이프라인·빈 이미지 삭제 (2026-09-27 밤, V17)
 
